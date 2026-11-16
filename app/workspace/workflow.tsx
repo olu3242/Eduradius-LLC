@@ -100,7 +100,7 @@ function TextField({ label, value, onChange, type = 'text', area = false, requir
   return <label className={'field ' + (area ? 'wide' : '')}><span>{label}{required ? ' *' : ''}</span>
     {area ? <textarea value={value} onChange={e => onChange(e.target.value)} rows={3} required={required} aria-describedby={hint ? hintId : undefined} disabled={disabled} />
       : <input type={type} value={value} onChange={e => onChange(e.target.value)} required={required} aria-describedby={hint ? hintId : undefined} disabled={disabled} />}
-    {hint && <small id={hintId} className="field-hint">{hint}</small>}</label>;
+    {hint && <small id={hintId} className="field-hint" aria-hidden="true">{hint}</small>}</label>;
 }
 export function ActivityList({ items, empty }: { items: ActivityRecord[]; empty: string }) {
   if (!items.length) return <p className="muted">{empty}</p>;

@@ -3,7 +3,7 @@
 // and the opportunity "pursuit" workspace.
 import { useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, Building2, FileCheck2, Link2, Plus, RefreshCw, Search, Unlink, X } from 'lucide-react';
-import { SPECS, ORGANIZATION_TYPES, evidenceState, requirementSummary, type FieldSpec, type TypeSpec, type Values, type EvidenceLink } from '../../lib/records';
+import { SPECS, ORGANIZATION_TYPES, defaults, evidenceState, requirementSummary, type FieldSpec, type TypeSpec, type Values, type EvidenceLink } from '../../lib/records';
 import type { OpportunityRecord } from '../../lib/workflow';
 import { Alert, DueChip, StatusBadge, useDialog, type Workflow } from './workflow';
 
@@ -22,7 +22,7 @@ export function RecordDialog({ spec, record, fixed = {}, hide = [], refOptions =
   const ref = useDialog(onClose);
   const titleId = useId();
   const editable = spec.fields.filter(f => !f.derived && !f.readOnly && !(f.key in fixed) && !hide.includes(f.key) && !(record && f.immutable));
-  const [values, setValues] = useState<Values>(() => Object.fromEntries(editable.map(f => [f.key, record ? record[f.key] : f.default ?? (f.kind === 'bool' ? false : f.kind === 'date' || f.kind === 'ref' ? null : '')])));
+  const [values, setValues] = useState<Values>(() => { const initial = defaults(spec); return Object.fromEntries(editable.map(f => [f.key, record ? record[f.key] : initial[f.key]])); });
   const [error, setError] = useState(''), [saving, setSaving] = useState(false), [duplicates, setDuplicates] = useState<Values[]>([]);
   const set = (k: string, v: unknown) => setValues(prev => ({ ...prev, [k]: v }));
   async function submit(e: React.FormEvent | null, confirmDistinct = false) {
@@ -54,11 +54,15 @@ export function RecordDialog({ spec, record, fixed = {}, hide = [], refOptions =
 export function FieldInput({ field, value, onChange, options }: { field: FieldSpec; value: unknown; onChange: (v: unknown) => void; options?: Option[] }) {
   const hintId = useId();
   const label = <span>{field.label}{field.required ? ' *' : ''}</span>;
-  const hint = field.hint ? <small id={hintId} className="field-hint">{field.hint}</small> : null;
+  const hint = field.hint ? <small id={hintId} className="field-hint" aria-hidden="true">{field.hint}</small> : null;
   const described = field.hint ? hintId : undefined;
   if (field.kind === 'bool') return <label className="field checkbox-field"><input type="checkbox" checked={Boolean(value)} onChange={e => onChange(e.target.checked)} aria-describedby={described} />{label}{hint}</label>;
   if (field.kind === 'enum') return <label className="field">{label}<select value={str(value)} onChange={e => onChange(e.target.value)} aria-describedby={described}>{(field.options ?? []).map(o => <option key={o}>{o}</option>)}</select>{hint}</label>;
   if (field.kind === 'ref') return <label className="field">{label}<select value={str(value)} onChange={e => onChange(e.target.value || null)} aria-describedby={described}><option value="">None</option>{(options ?? []).map(o => <option key={o.id} value={o.id}>{o.label}</option>)}</select>{hint}</label>;
+  if (field.kind === 'refs') {
+    const selected = Array.isArray(value) ? (value as string[]) : [];
+    return <fieldset className="field wide refs-field"><legend>{field.label}</legend>{(options ?? []).length ? (options ?? []).map(o => <label key={o.id} className="inline-check"><input type="checkbox" checked={selected.includes(o.id)} onChange={e => onChange(e.target.checked ? [...selected, o.id] : selected.filter(x => x !== o.id))} />{o.label}</label>) : <span className="muted">Nothing to choose yet.</span>}{hint}</fieldset>;
+  }
   if (field.kind === 'longtext') return <label className="field wide">{label}<textarea rows={3} value={str(value)} required={field.required} maxLength={field.max} onChange={e => onChange(e.target.value)} aria-describedby={described} />{hint}</label>;
   const type = field.kind === 'date' ? 'date' : field.kind === 'email' ? 'email' : field.kind === 'url' ? 'url' : 'text';
   return <label className="field">{label}<input type={type} value={str(value)} required={field.required} maxLength={field.max} onChange={e => onChange(field.kind === 'date' ? e.target.value || null : e.target.value)} aria-describedby={described} />{hint}</label>;

@@ -67,6 +67,36 @@ export const SUBMISSION_OUTCOMES = ['Pending', 'Awarded', 'Not awarded', 'Withdr
 export const PARTNER_ROLES = ['Prime', 'Subcontractor', 'Teaming partner', 'Consultant', 'Mentor'] as const;
 /** Only 'Agreement signed' (with a reference) indicates agreed participation. */
 export const DISCUSSION_STATUSES = ['Identified', 'Contacted', 'In discussion', 'Interested', 'Declined', 'Agreement drafted', 'Agreement signed'] as const;
+// ── Increment 3: projects and delivery planning ───────────────────────────
+export const PROJECT_STATUSES = ['Planning', 'Active', 'On hold', 'Closing', 'Closed', 'Cancelled'] as const;
+/** Allowed manual transitions. 'Closed' is reached only through closeout. */
+export const PROJECT_TRANSITIONS: Record<string, readonly string[]> = {
+  Planning: ['Active', 'On hold', 'Cancelled'], Active: ['On hold', 'Closing', 'Cancelled'], 'On hold': ['Active', 'Planning', 'Cancelled'],
+  Closing: ['Active', 'Cancelled'], Closed: ['Active'], Cancelled: ['Planning'],
+};
+/** Transitions that must record a reason (cancellation, holds and every reopening). */
+export const reasonRequired = (from: string, to: string) => to === 'Cancelled' || to === 'On hold' || (from === 'Closing' && to === 'Active') || from === 'Closed' || from === 'Cancelled';
+export const MILESTONE_STATUSES = ['Not started', 'In progress', 'Blocked', 'Complete'] as const;
+export const DELIVERABLE_STATUSES = ['Draft', 'Ready for review', 'Changes requested', 'Accepted'] as const;
+export const LOG_KINDS = ['Risk', 'Issue', 'Decision', 'Action'] as const;
+export const LOG_STATUSES = ['Open', 'Monitoring', 'Resolved', 'Closed'] as const;
+export const SEVERITIES = ['Low', 'Medium', 'High'] as const;
+
+/** Returns the milestone ids forming a dependency cycle, or null. */
+export function findCycle(milestones: { id: string; dependsOn: string[] }[]): string[] | null {
+  const deps = new Map(milestones.map(m => [m.id, m.dependsOn]));
+  const state = new Map<string, 1 | 2>(), stack: string[] = [];
+  const visit = (id: string): string[] | null => {
+    if (state.get(id) === 2) return null;
+    if (state.get(id) === 1) return stack.slice(stack.indexOf(id)).concat(id);
+    state.set(id, 1); stack.push(id);
+    for (const next of deps.get(id) ?? []) { if (!deps.has(next)) continue; const c = visit(next); if (c) return c; }
+    stack.pop(); state.set(id, 2); return null;
+  };
+  for (const m of milestones) { const c = visit(m.id); if (c) return c; }
+  return null;
+}
+
 export type Section = { body: string; basis: string; refs: string[] };
 export type Sections = Record<string, Section>;
 
@@ -212,6 +242,84 @@ export const SPECS: Record<string, TypeSpec> = {
       f('nextAction', 'Next action', 'text', { max: 300 }),
       f('nextActionDue', 'Next-action due date', 'date'),
       f('agreementReference', 'Agreement reference', 'text', { max: 200, hint: 'e.g. signed teaming agreement or NDA reference. Required for Agreement signed.' }),
+    ],
+  },
+  project: {
+    type: 'project', table: 'projects', label: 'Project', plural: 'Projects', titleKey: 'title', createViaAction: true,
+    fields: [
+      f('opportunityId', 'Opportunity', 'ref', { ref: 'opportunity', readOnly: true }),
+      f('proposalId', 'Proposal', 'ref', { ref: 'proposal', readOnly: true }),
+      f('proposalVersionId', 'Approved proposal version', 'ref', { ref: 'proposalVersion', readOnly: true }),
+      f('submissionId', 'Submission record', 'ref', { ref: 'submission', readOnly: true }),
+      f('awardEvidenceId', 'Award evidence', 'ref', { ref: 'evidence', readOnly: true }),
+      f('clientOrganizationId', 'Client organization', 'ref', { ref: 'organization' }),
+      f('title', 'Project title', 'text', { max: 200, required: true }),
+      f('owner', 'Project owner', 'text', { max: 120 }),
+      f('startDate', 'Start date', 'date'),
+      f('scope', 'Active baseline scope', 'longtext', { readOnly: true }),
+      f('plannedEndDate', 'Planned completion (active baseline)', 'date', { readOnly: true }),
+      f('actualEndDate', 'Actual completion', 'date', { readOnly: true }),
+      f('status', 'Status', 'enum', { options: PROJECT_STATUSES, default: 'Planning', readOnly: true }),
+      f('statusReason', 'Status reason', 'longtext', { readOnly: true }),
+      f('activeBaselineId', 'Active baseline', 'ref', { ref: 'projectBaseline', readOnly: true }),
+      f('nextAction', 'Next action', 'text', { max: 300 }),
+      f('nextActionDue', 'Next-action due date', 'date'),
+    ],
+  },
+  projectBaseline: {
+    type: 'projectBaseline', table: 'project_baselines', label: 'Baseline', plural: 'Baselines', titleKey: 'number', actionOnly: true,
+    fields: [
+      f('projectId', 'Project', 'ref', { ref: 'project', readOnly: true }),
+      f('number', 'Baseline', 'int', { readOnly: true }),
+      f('scope', 'Scope', 'longtext', { readOnly: true }),
+      f('plannedEndDate', 'Planned completion', 'date', { readOnly: true }),
+      f('source', 'Source', 'text', { readOnly: true }),
+      f('changeRequestId', 'Change request', 'ref', { ref: 'changeRequest', readOnly: true }),
+      f('createdBy', 'Recorded by', 'text', { readOnly: true }),
+    ],
+  },
+  milestone: {
+    type: 'milestone', table: 'milestones', label: 'Milestone', plural: 'Milestones', titleKey: 'title',
+    fields: [
+      f('projectId', 'Project', 'ref', { ref: 'project', required: true, immutable: true }),
+      f('title', 'Milestone', 'text', { max: 200, required: true }),
+      f('owner', 'Owner', 'text', { max: 120 }),
+      f('plannedDate', 'Planned date', 'date'),
+      f('actualDate', 'Actual completion date', 'date'),
+      f('status', 'Status', 'enum', { options: MILESTONE_STATUSES, default: 'Not started' }),
+      f('completionCriteria', 'Completion criteria', 'longtext', { max: 2000 }),
+      f('dependsOn', 'Depends on', 'refs', { ref: 'milestone', sameParent: 'projectId' }),
+      f('changeNote', 'Reason for change', 'longtext', { max: 2000, hint: 'Required when reopening a completed milestone.' }),
+    ],
+  },
+  deliverable: {
+    type: 'deliverable', table: 'deliverables', label: 'Deliverable', plural: 'Deliverables', titleKey: 'title',
+    fields: [
+      f('projectId', 'Project', 'ref', { ref: 'project', required: true, immutable: true }),
+      f('milestoneId', 'Milestone', 'ref', { ref: 'milestone', sameParent: 'projectId' }),
+      f('title', 'Deliverable', 'text', { max: 200, required: true }),
+      f('description', 'Description', 'longtext', { max: 4000 }),
+      f('owner', 'Owner', 'text', { max: 120 }),
+      f('dueDate', 'Due date', 'date'),
+      f('required', 'Required for closeout', 'bool', { default: true }),
+      f('draftSummary', 'Current draft (summary and location)', 'longtext', { max: 8000, hint: 'Describe the draft and where it is kept. Files are not uploaded.' }),
+      f('status', 'Review status', 'enum', { options: DELIVERABLE_STATUSES, default: 'Draft', readOnly: true }),
+      f('latestVersionId', 'Latest version', 'ref', { ref: 'deliverableVersion', readOnly: true }),
+      f('acceptedVersionId', 'Accepted version', 'ref', { ref: 'deliverableVersion', readOnly: true }),
+    ],
+  },
+  projectLog: {
+    type: 'projectLog', table: 'project_log', label: 'Log entry', plural: 'Risks, issues, decisions and actions', titleKey: 'title',
+    fields: [
+      f('projectId', 'Project', 'ref', { ref: 'project', required: true, immutable: true }),
+      f('kind', 'Type', 'enum', { options: LOG_KINDS, default: 'Risk' }),
+      f('title', 'Title', 'text', { max: 200, required: true }),
+      f('description', 'Description', 'longtext', { max: 4000 }),
+      f('owner', 'Owner', 'text', { max: 120 }),
+      f('severity', 'Severity', 'enum', { options: SEVERITIES, default: 'Medium' }),
+      f('status', 'Status', 'enum', { options: LOG_STATUSES, default: 'Open' }),
+      f('dueDate', 'Due / next action date', 'date'),
+      f('resolution', 'Resolution / decision rationale', 'longtext', { max: 4000 }),
     ],
   },
 };

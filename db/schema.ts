@@ -240,3 +240,83 @@ export const teamingPartners = sqliteTable('teaming_partners', {
   agreementReference: text('agreement_reference').notNull().default(''),
   ...recordColumns(),
 }, t => [uniqueIndex('teaming_partner_uq').on(t.opportunityId, t.organizationId)]);
+
+// ── Projects and delivery planning (migration 0005) ──
+export const projects = sqliteTable('projects', {
+  id: text('id').primaryKey(),
+  opportunityId: text('opportunity_id').notNull(),
+  proposalId: text('proposal_id'),
+  proposalVersionId: text('proposal_version_id'),
+  submissionId: text('submission_id'),
+  awardEvidenceId: text('award_evidence_id'),
+  clientOrganizationId: text('client_organization_id'),
+  title: text('title').notNull(),
+  owner: text('owner').notNull().default(''),
+  startDate: text('start_date'),
+  scope: text('scope').notNull().default(''),
+  plannedEndDate: text('planned_end_date'),
+  actualEndDate: text('actual_end_date'),
+  status: text('status').notNull().default('Planning'),
+  statusReason: text('status_reason').notNull().default(''),
+  activeBaselineId: text('active_baseline_id'),
+  nextAction: text('next_action').notNull().default(''),
+  nextActionDue: text('next_action_due'),
+  ...recordColumns(),
+}, t => [uniqueIndex('projects_opportunity_uq').on(t.opportunityId)]);
+
+// The first baseline is the award baseline; later ones come only from approved changes.
+export const projectBaselines = sqliteTable('project_baselines', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  number: integer('number').notNull(),
+  scope: text('scope').notNull(),
+  plannedEndDate: text('planned_end_date'),
+  source: text('source').notNull(),
+  changeRequestId: text('change_request_id'),
+  createdBy: text('created_by').notNull().default(''),
+  ...recordColumns(),
+}, t => [uniqueIndex('project_baselines_number_uq').on(t.projectId, t.number)]);
+
+export const milestones = sqliteTable('milestones', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  title: text('title').notNull(),
+  owner: text('owner').notNull().default(''),
+  plannedDate: text('planned_date'),
+  actualDate: text('actual_date'),
+  status: text('status').notNull().default('Not started'),
+  completionCriteria: text('completion_criteria').notNull().default(''),
+  dependsOn: text('depends_on').notNull().default('[]'),
+  changeNote: text('change_note').notNull().default(''),
+  ...recordColumns(),
+}, t => [index('milestones_project_idx').on(t.projectId)]);
+
+export const deliverables = sqliteTable('deliverables', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  milestoneId: text('milestone_id'),
+  title: text('title').notNull(),
+  description: text('description').notNull().default(''),
+  owner: text('owner').notNull().default(''),
+  dueDate: text('due_date'),
+  required: integer('required').notNull().default(1),
+  draftSummary: text('draft_summary').notNull().default(''),
+  status: text('status').notNull().default('Draft'),
+  latestVersionId: text('latest_version_id'),
+  acceptedVersionId: text('accepted_version_id'),
+  ...recordColumns(),
+}, t => [index('deliverables_project_idx').on(t.projectId)]);
+
+export const projectLog = sqliteTable('project_log', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  kind: text('kind').notNull().default('Risk'),
+  title: text('title').notNull(),
+  description: text('description').notNull().default(''),
+  owner: text('owner').notNull().default(''),
+  severity: text('severity').notNull().default('Medium'),
+  status: text('status').notNull().default('Open'),
+  dueDate: text('due_date'),
+  resolution: text('resolution').notNull().default(''),
+  ...recordColumns(),
+}, t => [index('project_log_project_idx').on(t.projectId)]);

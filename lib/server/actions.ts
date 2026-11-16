@@ -1,6 +1,6 @@
 // Explicit, transactional workflow actions dispatched by POST /api/actions/:name.
 // Generic edits (records-store) never change workflow-controlled fields; these do.
-import { SPECS, EVIDENCE_SUBJECTS, SECTION_BASIS, SUBMISSION_METHODS, SUBMISSION_OUTCOMES, emptySections, evidenceState, organizationKey, emailKey, websiteDomain, validateSections, type Sections, type Values } from '../records';
+import { SPECS, EVIDENCE_SUBJECTS, PROJECT_TRANSITIONS, reasonRequired, SECTION_BASIS, SUBMISSION_METHODS, SUBMISSION_OUTCOMES, emptySections, evidenceState, organizationKey, emailKey, websiteDomain, validateSections, type Sections, type Values } from '../records';
 import { businessDate, isIsoDate } from '../workflow';
 import { activityStatement, type StoreResult } from './workflow-store';
 import { db, nowIso, getRecord, recordExists, tableFor, activity, conflict, insertStatement } from './records-store';
@@ -13,7 +13,7 @@ const isVersion = (v: unknown): v is number => Number.isInteger(v);
 type Row = Record<string, unknown>;
 
 /** Columns that reference organizations/contacts; merges move every reference. Extended per increment. */
-export const ORGANIZATION_REFS: [string, string][] = [['contacts', 'organization_id'], ['inquiries', 'organization_id'], ['opportunities', 'organization_id'], ['teaming_partners', 'organization_id']];
+export const ORGANIZATION_REFS: [string, string][] = [['contacts', 'organization_id'], ['inquiries', 'organization_id'], ['opportunities', 'organization_id'], ['teaming_partners', 'organization_id'], ['projects', 'client_organization_id']];
 export const CONTACT_REFS: [string, string][] = [['inquiries', 'contact_id'], ['opportunities', 'contact_id'], ['teaming_partners', 'contact_id']];
 
 // ── Evidence links ──────────────────────────────────────────────────────────
@@ -275,7 +275,74 @@ async function saveTemplate(body: Body, actor: string): Promise<StoreResult<unkn
   return { status: 201, body: { record: await getRecord('proposalTemplate', id) } };
 }
 
+// ── Award → project and project status ─────────────────────────────────────
+
+/**
+ * Creates exactly one project for an opportunity from a confirmed award. Requires a
+ * submission with outcome "Awarded" and award evidence, plus explicit confirmation of the
+ * reviewed client, scope, owner, dates and initial deliverables. Retries return the
+ * existing project (unique opportunity index).
+ */
+async function createProjectFromAward(body: Body, actor: string): Promise<StoreResult<unknown>> {
+  const submission = await getRecord('submission', str(body.submissionId));
+  if (!submission) return bad('Submission record not found.', 404);
+  const existing = await db().prepare('SELECT id FROM projects WHERE opportunity_id = ?').bind(submission.opportunityId).first<Row>();
+  if (existing) return { status: 200, body: { record: await getRecord('project', String(existing.id)), alreadyCreated: true } };
+  if (submission.outcome !== 'Awarded' || !submission.awardEvidenceId) return bad('A project can only be created after the award is recorded with award evidence. Approval or submission is not an award.', 409);
+  if (body.confirm !== true) return bad('Confirm the reviewed project details before creating the project.');
+  const title = str(body.title).trim(), scope = str(body.scope).trim(), owner = str(body.owner).trim();
+  if (!title || title.length > 200) return bad('Project title is required (200 characters or fewer).');
+  if (!scope || scope.length > 8000) return bad('Describe the awarded scope (8,000 characters or fewer).');
+  const startDate = body.startDate ? str(body.startDate) : null, plannedEndDate = body.plannedEndDate ? str(body.plannedEndDate) : null;
+  if ((startDate && !isIsoDate(startDate)) || (plannedEndDate && !isIsoDate(plannedEndDate))) return bad('Dates must be valid.');
+  if (startDate && plannedEndDate && plannedEndDate < startDate) return bad('Planned completion cannot be before the start date.');
+  const clientOrganizationId = body.clientOrganizationId ? str(body.clientOrganizationId) : null;
+  if (clientOrganizationId) { const org = await getRecord('organization', clientOrganizationId); if (!org || org.status !== 'Active') return bad('Choose an active client organization.'); }
+  const deliverables = Array.isArray(body.deliverables) ? body.deliverables as Body[] : [];
+  if (deliverables.length > 30) return bad('Add up to 30 initial deliverables; more can be added later.');
+  for (const d of deliverables) if (!str(d.title).trim() || str(d.title).length > 200 || (d.dueDate && !isIsoDate(d.dueDate))) return bad('Each deliverable needs a title and a valid due date (if set).');
+  const proposal = await getRecord('proposal', String(submission.proposalId));
+  const id = crypto.randomUUID(), baselineId = crypto.randomUUID(), at = nowIso(), requestId = crypto.randomUUID();
+  const guard = { sql: 'SELECT 1 FROM projects WHERE id = ? AND last_request_id = ?', args: [id, requestId] };
+  try {
+    await db().batch([
+      insertStatement(SPECS.project, id, { opportunityId: submission.opportunityId, proposalId: submission.proposalId, proposalVersionId: submission.proposalVersionId, submissionId: submission.id, awardEvidenceId: submission.awardEvidenceId, clientOrganizationId, title, owner, startDate, scope, plannedEndDate, actualEndDate: null, status: 'Planning', statusReason: '', activeBaselineId: baselineId, nextAction: '', nextActionDue: null }, at, requestId),
+      insertStatement(SPECS.projectBaseline, baselineId, { projectId: id, number: 1, scope, plannedEndDate, source: 'Award baseline', changeRequestId: null, createdBy: actor }, at, requestId, guard),
+      ...deliverables.map(d => insertStatement(SPECS.deliverable, crypto.randomUUID(), { projectId: id, milestoneId: null, title: str(d.title).trim(), description: '', owner: '', dueDate: d.dueDate || null, required: d.required !== false, draftSummary: '', status: 'Draft', latestVersionId: null, acceptedVersionId: null }, at, requestId, guard)),
+      db().prepare(`INSERT OR IGNORE INTO evidence_links (id, evidence_id, subject_type, subject_id, created_at) SELECT ?, ?, 'project', ?, ? WHERE EXISTS (${guard.sql})`).bind(crypto.randomUUID(), submission.awardEvidenceId, id, at, ...guard.args),
+      activity(actor, at, 'project', id, { type: 'project.created', summary: `Project created from confirmed award${proposal ? ` (proposal “${String(proposal.title).slice(0, 80)}”)` : ''}`, details: { opportunityId: submission.opportunityId, submissionId: submission.id, proposalVersionId: submission.proposalVersionId, deliverables: deliverables.length } }, 'projects', requestId),
+    ]);
+  } catch (error) {
+    if (/UNIQUE constraint failed/i.test(String(error))) {
+      const row = await db().prepare('SELECT id FROM projects WHERE opportunity_id = ?').bind(submission.opportunityId).first<Row>();
+      if (row) return { status: 200, body: { record: await getRecord('project', String(row.id)), alreadyCreated: true } };
+    }
+    throw error;
+  }
+  return { status: 201, body: { record: await getRecord('project', id), alreadyCreated: false } };
+}
+
+async function transitionProject(body: Body, actor: string): Promise<StoreResult<unknown>> {
+  const project = await getRecord('project', str(body.id));
+  if (!project) return bad('Project not found.', 404);
+  if (!isVersion(body.version) || project.version !== body.version) return conflict(project);
+  const from = String(project.status), to = str(body.to), reason = str(body.reason).trim();
+  if (to === 'Closed') return bad('Projects are closed through the closeout checklist.');
+  if (!(PROJECT_TRANSITIONS[from] ?? []).includes(to)) return bad(`A project cannot move from ${from} to ${to}.`, 409);
+  if (reasonRequired(from, to) && !reason) return bad(`Record the reason for moving this project to ${to}.`);
+  if (reason.length > 4000) return bad('Reason is too long.');
+  const at = nowIso(), requestId = crypto.randomUUID();
+  const results = await db().batch([
+    db().prepare('UPDATE projects SET status = ?, status_reason = ?, actual_end_date = CASE WHEN ? IN (\'Active\', \'Planning\') THEN NULL ELSE actual_end_date END, version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND version = ? AND status = ?')
+      .bind(to, reason, to, at, requestId, project.id, project.version, from),
+    activity(actor, at, 'project', String(project.id), { type: from === 'Closed' || from === 'Cancelled' || (from === 'Closing' && to === 'Active') ? 'project.reopened' : to === 'Cancelled' ? 'project.cancelled' : 'project.status_changed', summary: `Project status ${from} → ${to}${reason ? ` (reason recorded)` : ''}`, details: { from, to, reason: reason.slice(0, 200) } }, 'projects', requestId),
+  ]);
+  return results[0].meta.changes ? { status: 200, body: { record: await getRecord('project', String(project.id)) } } : conflict(await getRecord('project', String(project.id)));
+}
+
 export const ACTIONS: Record<string, Action> = {
+  'project.createFromAward': createProjectFromAward,
+  'project.transition': transitionProject,
   'proposal.create': createProposal,
   'proposal.submitForReview': submitForReview,
   'proposal.approve': (b, a) => reviewProposal(b, a, 'approve'),

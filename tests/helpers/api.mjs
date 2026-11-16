@@ -29,3 +29,20 @@ export const snapshot = async () => (await workflowRoute.GET(req('/api/workflow?
 export const opportunity = async (title = 'State AI policy RFP', extra = {}) => (await (await opportunitiesRoute.POST(req('/api/opportunities', 'POST', { opportunity: { title, ...extra } }))).json()).opportunity;
 export const rows = async sql => (await ctx.db.prepare(sql).all()).results;
 export const record = async (type, id) => (await snapshot()).records[type].find(r => r.id === id);
+
+/** Drives opportunity → proposal → owner approval → submission → recorded award. */
+export async function awardedSubmission({ award = true } = {}) {
+  const { emptySections, SECTION_BASIS } = await import('../../lib/records.ts');
+  const opp = await opportunity('Awarded pursuit');
+  const org = await added('organization', { name: 'Riverside ISD ' + Math.random().toString(36).slice(2, 7), orgType: 'Government buyer' });
+  let { record: proposal } = await acted('proposal.create', { opportunityId: opp.id, title: 'Riverside proposal' }, 201);
+  const sections = emptySections(); sections.executiveSummary = { body: 'Summary', basis: SECTION_BASIS[0], refs: [] };
+  proposal = await edited('proposal', proposal, { sections });
+  proposal = (await acted('proposal.submitForReview', { id: proposal.id, version: proposal.version })).record;
+  proposal = (await acted('proposal.approve', { id: proposal.id, version: proposal.version })).record;
+  let { record: submission } = await acted('proposal.recordSubmission', { id: proposal.id, version: proposal.version, submittedOn: '2026-11-20', method: 'Email' }, 201);
+  const notice = await added('evidence', { title: 'Notice of award', category: 'Award', reviewStatus: 'Verified' });
+  if (award) submission = (await acted('submission.recordOutcome', { id: submission.id, version: submission.version, outcome: 'Awarded', outcomeDate: '2026-12-01', awardEvidenceId: notice.id, confirmAward: true })).record;
+  return { opp, org, proposal, submission, notice };
+}
+export const projectInput = (submission, extra = {}) => ({ submissionId: submission.id, confirm: true, title: 'Riverside AI governance', scope: 'Governance framework and staff training.', owner: 'Olu', startDate: '2026-12-01', plannedEndDate: '2027-03-31', deliverables: [{ title: 'Governance framework' }, { title: 'Training workshop', dueDate: '2027-02-15' }], ...extra });

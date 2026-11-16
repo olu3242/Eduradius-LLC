@@ -2,7 +2,7 @@
 // One table per type is the authoritative source; every write is version-checked and
 // recorded in activity with a server-derived actor and timestamp.
 import { env } from 'cloudflare:workers';
-import { SPECS, defaults, validateRecord, validateSections, organizationKey, websiteDomain, emailKey, evidenceState, type TypeSpec, type Values, type EvidenceLink } from '../records';
+import { SPECS, defaults, validateRecord, validateSections, findCycle, organizationKey, websiteDomain, emailKey, evidenceState, type TypeSpec, type Values, type EvidenceLink } from '../records';
 import { businessDate, type ActivityDraft } from '../workflow';
 import { activityStatement, type StoreResult } from './workflow-store';
 
@@ -89,11 +89,52 @@ export const HOOKS: Record<string, Hook> = {
       ? { value: { ...v, status: 'Draft' }, events: [{ type: 'proposal.reopened', summary: 'Approved proposal edited — a new draft now needs owner review (approved version preserved)' }] }
       : { value: v },
   },
+  project: {
+    validate: async (v, current) => (current && ['Closed', 'Cancelled'].includes(String(current.status)) ? `This project is ${String(current.status).toLowerCase()}; reopen it to make changes.`
+      : v.nextActionDue && !String(v.nextAction).trim() ? 'Describe the next action before setting a due date.' : null),
+  },
+  milestone: {
+    validate: async (v, current) => {
+      const locked = await projectLocked(v.projectId); if (locked) return locked;
+      if (current?.status === 'Complete') {
+        if (v.status === 'Complete' && !sameValues(v, current, ['title', 'plannedDate', 'actualDate', 'completionCriteria', 'dependsOn'])) return 'This milestone is complete. Reopen it with a reason before changing completed work.';
+        if (v.status !== 'Complete' && (!String(v.changeNote).trim() || v.changeNote === current.changeNote)) return 'Record the reason for reopening this completed milestone.';
+      }
+      const siblings = (await listRecords('milestone')).filter(m => m.projectId === v.projectId);
+      if (v.status === 'Complete') {
+        if (!v.actualDate) return 'Record the actual completion date.';
+        const open = (v.dependsOn as string[]).filter(id => siblings.find(m => m.id === id)?.status !== 'Complete');
+        if (open.length) return 'Complete the milestones this one depends on first.';
+      }
+      const graph = siblings.filter(m => m.id !== v.id).map(m => ({ id: String(m.id), dependsOn: m.dependsOn as string[] }));
+      graph.push({ id: String(v.id), dependsOn: v.dependsOn as string[] });
+      return findCycle(graph) ? 'These dependencies would create a cycle.' : null;
+    },
+  },
+  deliverable: {
+    validate: async (v, current) => {
+      const locked = await projectLocked(v.projectId); if (locked) return locked;
+      if (current?.status === 'Ready for review' && !sameValues(v, current, ['title', 'description', 'draftSummary'])) return 'This deliverable is in review. Request changes before editing the draft.';
+      return null;
+    },
+    // Revising accepted content starts a new draft that needs review; the accepted version is kept.
+    adjust: (v, current, changed) => current.status === 'Accepted' && changed.some(k => ['title', 'description', 'draftSummary'].includes(k))
+      ? { value: { ...v, status: 'Draft' }, events: [{ type: 'deliverable.revised', summary: 'Accepted deliverable revised — a new version will need review (accepted version preserved)' }] }
+      : { value: v },
+  },
+  projectLog: {
+    validate: async v => (await projectLocked(v.projectId)) ?? (['Resolved', 'Closed'].includes(String(v.status)) && !String(v.resolution).trim() ? 'Record the resolution or decision rationale before closing this entry.' : null),
+  },
   teamingPartner: {
     validate: async v => (v.discussionStatus === 'Agreement signed' && !String(v.agreementReference).trim() ? 'Record the agreement reference before marking an agreement signed.'
       : v.nextActionDue && !String(v.nextAction).trim() ? 'Describe the next action before setting a due date.' : null),
   },
 };
+async function projectLocked(projectId: unknown): Promise<string | null> {
+  const project = await getRecord('project', String(projectId));
+  return project && ['Closed', 'Cancelled'].includes(String(project.status)) ? `This project is ${String(project.status).toLowerCase()}; reopen it before changing its plan.` : null;
+}
+const sameValues = (a: Values, b: Values, keys: string[]) => keys.every(k => JSON.stringify(a[k]) === JSON.stringify(b[k]));
 const uniqueViolation = (error: unknown) => /UNIQUE constraint failed/i.test(String(error));
 
 export async function findDuplicates(type: string, v: Values, excludeId = '') {
