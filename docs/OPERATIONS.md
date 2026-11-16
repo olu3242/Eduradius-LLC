@@ -38,7 +38,7 @@ The preflight reports names and checks (presence, length, placeholder patterns, 
 corepack enable
 pnpm install --frozen-lockfile
 pnpm build
-for f in drizzle/0000_wonderful_exiles.sql drizzle/0001_access_protection.sql drizzle/0002_connected_workflow.sql; do
+for f in drizzle/0*.sql; do   # every migration, in numeric order
   node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local \
     --config dist/server/wrangler.json --persist-to .wrangler/state --file "$f"
 done
@@ -54,6 +54,12 @@ pnpm dev
 | 0000 | `0000_wonderful_exiles.sql` | `workspaces` | — |
 | 0001 | `0001_access_protection.sql` | `rate_limits` | Yes (additive) |
 | 0002 | `0002_connected_workflow.sql` | `inquiries`, `opportunities`, `activity_events`, `notifications`, `workspace_snapshots` + indexes | Yes (additive; old code ignores the tables) |
+| 0003 | `0003_contracting_records.sql` | `organizations`, `contacts`, `requirements`, `evidence`, `evidence_links`; `organization_id`/`contact_id` columns on `inquiries` and `opportunities` | Yes (new tables; nullable `ADD COLUMN`; earlier code selects explicit columns) |
+| 0004 | `0004_proposals_and_teaming.sql` | `proposal_templates`, `proposals`, `proposal_versions`, `submissions`, `teaming_partners` | Yes (additive) |
+| 0005 | `0005_projects_and_delivery.sql` | `projects`, `project_baselines`, `milestones`, `deliverables`, `project_log` | Yes (additive) |
+| 0006 | `0006_delivery_closeout.sql` | `deliverable_versions`, `change_requests`, `project_closeouts`, `experience_records` | Yes (additive) |
+
+Migrations 0003–0006 require **no data backfill**. Linking existing requests and opportunities to organizations is an explicit, rerunnable owner action (**Organizations → Link existing records**), not a migration. Because the workflow payload reads every table, apply **all** migrations before deploying code from this release.
 
 - Never edit an applied migration; add a new numbered file (`pnpm db:generate`).
 - Apply migrations **before** deploying the code that needs them. 0002 is additive, so code from before this release keeps working after it is applied.
@@ -87,6 +93,8 @@ Application-level backup: **Export workspace** downloads the document and every 
 
 ## Recovery
 
+**Migrations 0003–0006 fail part-way.** Each only creates tables and indexes, except that 0003 also adds two nullable columns to `inquiries` and `opportunities`. Inspect `sqlite_master` and `PRAGMA table_info(inquiries)`. Then either drop the objects the failed file created (D1 supports `ALTER TABLE … DROP COLUMN` for the 0003 columns) and rerun that file, or restore the pre-migration backup. No existing rows are modified.
+
 **Migration 0002 fails part-way.** D1 runs a file's statements without an outer transaction. Inspect with `SELECT name FROM sqlite_master`. Because 0002 only creates objects, drop any objects it created (`DROP TABLE` / `DROP INDEX` for the five tables and their indexes) and rerun it, or restore the pre-migration backup. Existing data is untouched.
 
 **The new release misbehaves after deploy.** Redeploy the previous build. Migration 0002 can stay, since old code ignores the new tables. Note that after the legacy import:
@@ -115,6 +123,9 @@ To fully return to the old model, restore the document from `workspace_snapshots
 - [ ] Mobile (390 px) Client requests, Follow-ups and dialogs have no horizontal overflow
 - [ ] Export downloads `schemaVersion: 2` with all collections
 - [ ] Logs contain no contact details or secrets
+- [ ] Contracting journey: create opportunity → link organization/contact → requirements + evidence → proposal → request changes → revise → approve → record submission → confirm award → create project → milestones → deliverable revision → client acceptance with verified evidence → approved change (baseline 2, baseline 1 kept) → closeout → private experience record → reload (see `tests/browser/contracting-journey.mjs`)
+- [ ] Retrying project creation and conversion returns the existing records; decided changes and preserved versions are read-only
+- [ ] Reports show “No records yet”, zero and unavailable counts correctly for staging data
 - [ ] Backup taken and a restore rehearsed on staging
 
 ## Production release checklist
