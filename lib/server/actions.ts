@@ -1,9 +1,9 @@
 // Explicit, transactional workflow actions dispatched by POST /api/actions/:name.
 // Generic edits (records-store) never change workflow-controlled fields; these do.
-import { SPECS, EVIDENCE_SUBJECTS, PROJECT_TRANSITIONS, reasonRequired, SECTION_BASIS, SUBMISSION_METHODS, SUBMISSION_OUTCOMES, emptySections, evidenceState, organizationKey, emailKey, websiteDomain, validateSections, type Sections, type Values } from '../records';
+import { SPECS, EVIDENCE_SUBJECTS, PROJECT_TRANSITIONS, ACCEPTANCE_KINDS, closeoutChecklist, reasonRequired, SECTION_BASIS, SUBMISSION_METHODS, SUBMISSION_OUTCOMES, emptySections, evidenceState, organizationKey, emailKey, websiteDomain, validateSections, type Sections, type Values } from '../records';
 import { businessDate, isIsoDate } from '../workflow';
 import { activityStatement, type StoreResult } from './workflow-store';
-import { db, nowIso, getRecord, recordExists, tableFor, activity, conflict, insertStatement } from './records-store';
+import { db, nowIso, getRecord, listRecords, listAllRecords, recordExists, tableFor, activity, conflict, insertStatement } from './records-store';
 
 type Body = Record<string, unknown>;
 export type Action = (body: Body, actor: string) => Promise<StoreResult<unknown>>;
@@ -340,7 +340,199 @@ async function transitionProject(body: Body, actor: string): Promise<StoreResult
   return results[0].meta.changes ? { status: 200, body: { record: await getRecord('project', String(project.id)) } } : conflict(await getRecord('project', String(project.id)));
 }
 
+// ── Deliverable review and acceptance ──────────────────────────────────────
+
+const deliverableGuard = 'SELECT 1 FROM deliverables WHERE id = ? AND last_request_id = ?';
+async function loadDeliverable(body: Body) {
+  const deliverable = await getRecord('deliverable', str(body.id));
+  if (!deliverable) return { error: bad('Deliverable not found.', 404) };
+  if (!isVersion(body.version) || deliverable.version !== body.version) return { error: conflict(deliverable) };
+  const project = await getRecord('project', String(deliverable.projectId));
+  if (!project || ['Closed', 'Cancelled'].includes(String(project.status))) return { error: bad('Reopen the project before reviewing its deliverables.', 409) };
+  return { deliverable };
+}
+
+async function submitDeliverable(body: Body, actor: string): Promise<StoreResult<unknown>> {
+  const { deliverable: d, error } = await loadDeliverable(body); if (error) return error;
+  if (!['Draft', 'Changes requested'].includes(String(d!.status))) return bad(`A deliverable in ${d!.status} cannot be submitted for review.`, 409);
+  if (!String(d!.draftSummary).trim()) return bad('Describe the current draft (content and where it is kept) before submitting it for review.');
+  const evidenceIds = (await db().prepare("SELECT evidence_id FROM evidence_links WHERE subject_type = 'deliverable' AND subject_id = ?").bind(d!.id).all<Row>()).results.map(r => String(r.evidence_id));
+  const max = await db().prepare('SELECT COALESCE(MAX(number), 0) AS n FROM deliverable_versions WHERE deliverable_id = ?').bind(d!.id).first<{ n: number }>();
+  const number = Number(max?.n ?? 0) + 1, versionId = crypto.randomUUID(), at = nowIso(), requestId = crypto.randomUUID();
+  const results = await db().batch([
+    db().prepare("UPDATE deliverables SET status = 'Ready for review', latest_version_id = ?, version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND version = ? AND status IN ('Draft', 'Changes requested')").bind(versionId, at, requestId, d!.id, d!.version),
+    insertStatement(SPECS.deliverableVersion, versionId, { deliverableId: d!.id, number, title: d!.title, summary: d!.draftSummary, evidenceIds, status: 'Ready for review', submittedBy: actor, submittedAt: at, reviewNotes: '', reviewedBy: '', reviewedAt: '', acceptanceKind: '', acceptanceAuthority: '', acceptanceEvidenceId: null }, at, requestId, { sql: deliverableGuard, args: [d!.id, requestId] }),
+    activity(actor, at, 'deliverable', String(d!.id), { type: 'deliverable.submitted_for_review', summary: `Version ${number} ready for review (nothing was sent externally)`, details: { versionId, number } }, 'deliverables', requestId),
+  ]);
+  return results[0].meta.changes ? { status: 200, body: { record: await getRecord('deliverable', String(d!.id)), versionId } } : conflict(await getRecord('deliverable', String(d!.id)));
+}
+
+async function reviewDeliverable(body: Body, actor: string, decision: 'accept' | 'changes'): Promise<StoreResult<unknown>> {
+  const { deliverable: d, error } = await loadDeliverable(body); if (error) return error;
+  if (d!.status !== 'Ready for review' || !d!.latestVersionId) return bad('Only a deliverable that is ready for review can be accepted or returned.', 409);
+  const notes = str(body.notes).trim(), versionId = String(d!.latestVersionId);
+  if (notes.length > 4000) return bad('Review notes are too long.');
+  let kind = '', authority = '', evidenceId: string | null = null;
+  if (decision === 'changes' && !notes) return bad('Record the requested revisions.');
+  if (decision === 'accept') {
+    kind = str(body.acceptanceKind);
+    if (!(ACCEPTANCE_KINDS as readonly string[]).includes(kind)) return bad('Choose internal approval or client acceptance.');
+    if (kind === 'Client acceptance') {
+      authority = str(body.acceptanceAuthority).trim();
+      if (!authority || authority.length > 200) return bad('Record who accepted on the client side (name and role).');
+      const evidence = body.acceptanceEvidenceId ? await getRecord('evidence', str(body.acceptanceEvidenceId)) : null;
+      if (!evidence || evidenceState(evidence, businessDate()) !== 'current') return bad('Client acceptance needs verified, unexpired acceptance evidence (e.g. a signed acceptance or written confirmation).');
+      evidenceId = String(evidence.id);
+    } else authority = `${actor} (internal approval — not client acceptance)`;
+  }
+  const at = nowIso(), requestId = crypto.randomUUID();
+  const statements = decision === 'accept' ? [
+    db().prepare("UPDATE deliverables SET status = 'Accepted', accepted_version_id = ?, version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND version = ? AND status = 'Ready for review'").bind(versionId, at, requestId, d!.id, d!.version),
+    db().prepare(`UPDATE deliverable_versions SET status = 'Superseded', version = version + 1, updated_at = ? WHERE deliverable_id = ? AND status = 'Accepted' AND id <> ? AND EXISTS (${deliverableGuard})`).bind(at, d!.id, versionId, d!.id, requestId),
+    db().prepare(`UPDATE deliverable_versions SET status = 'Accepted', review_notes = ?, reviewed_by = ?, reviewed_at = ?, acceptance_kind = ?, acceptance_authority = ?, acceptance_evidence_id = ?, version = version + 1, updated_at = ? WHERE id = ? AND EXISTS (${deliverableGuard})`).bind(notes, actor, at, kind, authority, evidenceId, at, versionId, d!.id, requestId),
+    ...(evidenceId ? [db().prepare(`INSERT OR IGNORE INTO evidence_links (id, evidence_id, subject_type, subject_id, created_at) SELECT ?, ?, 'deliverable', ?, ? WHERE EXISTS (${deliverableGuard})`).bind(crypto.randomUUID(), evidenceId, d!.id, at, d!.id, requestId)] : []),
+    activity(actor, at, 'deliverable', String(d!.id), { type: 'deliverable.accepted', summary: kind === 'Client acceptance' ? 'Client acceptance recorded with verified evidence' : 'Internal approval recorded (not client acceptance)', details: { versionId, kind } }, 'deliverables', requestId),
+  ] : [
+    db().prepare("UPDATE deliverables SET status = 'Changes requested', version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND version = ? AND status = 'Ready for review'").bind(at, requestId, d!.id, d!.version),
+    db().prepare(`UPDATE deliverable_versions SET status = 'Changes requested', review_notes = ?, reviewed_by = ?, reviewed_at = ?, version = version + 1, updated_at = ? WHERE id = ? AND EXISTS (${deliverableGuard})`).bind(notes, actor, at, at, versionId, d!.id, requestId),
+    activity(actor, at, 'deliverable', String(d!.id), { type: 'deliverable.changes_requested', summary: 'Revision requested', details: { versionId, notes: notes.slice(0, 200) } }, 'deliverables', requestId),
+  ];
+  const results = await db().batch(statements);
+  return results[0].meta.changes ? { status: 200, body: { record: await getRecord('deliverable', String(d!.id)) } } : conflict(await getRecord('deliverable', String(d!.id)));
+}
+
+// ── Change control ──────────────────────────────────────────────────────────
+
+/** Records a decision. Only an approval creates a new active baseline; earlier baselines are kept. */
+async function decideChange(body: Body, actor: string): Promise<StoreResult<unknown>> {
+  const change = await getRecord('changeRequest', str(body.id));
+  if (!change) return bad('Change request not found.', 404);
+  if (!isVersion(body.version) || change.version !== body.version) return conflict(change);
+  if (change.status !== 'Proposed') return bad('This change request has already been decided.', 409);
+  const decision = str(body.decision), reason = str(body.reason).trim();
+  if (!['Approved', 'Rejected', 'Withdrawn'].includes(decision)) return bad('Choose approve, reject or withdraw.');
+  if (!reason || reason.length > 4000) return bad('Record the decision rationale.');
+  const project = await getRecord('project', String(change.projectId));
+  if (!project || ['Closed', 'Cancelled'].includes(String(project.status))) return bad('Reopen the project before deciding changes.', 409);
+  const at = nowIso(), requestId = crypto.randomUUID(), guard = 'SELECT 1 FROM change_requests WHERE id = ? AND last_request_id = ?';
+  const statements = [
+    db().prepare('UPDATE change_requests SET status = ?, decision_reason = ?, decided_by = ?, decided_at = ?, resulting_baseline_id = ?, version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND version = ? AND status = \'Proposed\'')
+      .bind(decision, reason, actor, at, null, at, requestId, change.id, change.version),
+  ];
+  let baselineId: string | null = null;
+  if (decision === 'Approved') {
+    const max = await db().prepare('SELECT COALESCE(MAX(number), 0) AS n FROM project_baselines WHERE project_id = ?').bind(project.id).first<{ n: number }>();
+    baselineId = crypto.randomUUID();
+    const scope = String(change.newScope).trim() || String(project.scope), plannedEndDate = (change.newPlannedEndDate as string | null) ?? (project.plannedEndDate as string | null);
+    statements.push(
+      insertStatement(SPECS.projectBaseline, baselineId, { projectId: project.id, number: Number(max?.n ?? 0) + 1, scope, plannedEndDate, source: `Approved change: ${String(change.title).slice(0, 150)}`, changeRequestId: change.id, createdBy: actor }, at, requestId, { sql: guard, args: [change.id, requestId] }),
+      db().prepare(`UPDATE change_requests SET resulting_baseline_id = ? WHERE id = ? AND EXISTS (${guard})`).bind(baselineId, change.id, change.id, requestId),
+      db().prepare(`UPDATE projects SET scope = ?, planned_end_date = ?, active_baseline_id = ?, version = version + 1, updated_at = ? WHERE id = ? AND EXISTS (${guard})`).bind(scope, plannedEndDate, baselineId, at, project.id, change.id, requestId),
+      activityStatement(actor, at, 'project', String(project.id), { type: 'project.baseline_changed', summary: `Baseline updated by approved change “${String(change.title).slice(0, 100)}”`, details: { changeRequestId: change.id, baselineId } }, guard, [change.id, requestId]),
+    );
+  }
+  statements.push(activity(actor, at, 'changeRequest', String(change.id), { type: `changeRequest.${decision.toLowerCase()}`, summary: `Change ${decision.toLowerCase()} (decision recorded; no agreement is created or modified)`, details: { baselineId } }, 'change_requests', requestId));
+  const results = await db().batch(statements);
+  return results[0].meta.changes ? { status: 200, body: { record: await getRecord('changeRequest', String(change.id)), baselineId } } : conflict(await getRecord('changeRequest', String(change.id)));
+}
+
+// ── Closeout ────────────────────────────────────────────────────────────────
+
+async function closeoutProject(body: Body, actor: string): Promise<StoreResult<unknown>> {
+  const project = await getRecord('project', str(body.id));
+  if (!project) return bad('Project not found.', 404);
+  if (!isVersion(body.version) || project.version !== body.version) return conflict(project);
+  if (project.status !== 'Closing') return bad('Move the project to Closing before completing closeout. Cancellation is recorded separately.', 409);
+  const lessonsLearned = str(body.lessonsLearned).trim(), retentionNotes = str(body.retentionNotes).trim(), exceptionReason = str(body.exceptionReason).trim();
+  if (lessonsLearned.length > 8000 || retentionNotes.length > 4000 || exceptionReason.length > 4000) return bad('Closeout notes are too long.');
+  const actualEndDate = body.actualEndDate ? str(body.actualEndDate) : businessDate();
+  if (!isIsoDate(actualEndDate)) return bad('Actual completion date must be valid.');
+  const finalAcceptanceEvidenceId = body.finalAcceptanceEvidenceId ? str(body.finalAcceptanceEvidenceId) : null;
+  const { records } = await listAllRecords();
+  const checklist = closeoutChecklist(String(project.id), records, { finalAcceptanceEvidenceId, lessonsLearned, archiveReviewed: body.archiveReviewed === true }, businessDate());
+  const failing = checklist.filter(c => !c.passed);
+  if (failing.length && !exceptionReason) return { status: 409, body: { error: `Closeout is blocked: ${failing.map(c => c.label.toLowerCase()).join('; ')}. Resolve these or record an owner exception with a reason.`, checklist } as never };
+  const id = crypto.randomUUID(), at = nowIso(), requestId = crypto.randomUUID();
+  const results = await db().batch([
+    db().prepare("UPDATE projects SET status = 'Closed', status_reason = ?, actual_end_date = ?, version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND version = ? AND status = 'Closing'")
+      .bind(failing.length ? `Closed with owner exception: ${exceptionReason.slice(0, 300)}` : 'Closed after completing the closeout checklist', actualEndDate, at, requestId, project.id, project.version),
+    insertStatement(SPECS.closeout, id, { projectId: project.id, outcome: 'Completed', lessonsLearned, finalAcceptanceEvidenceId, archiveReviewed: body.archiveReviewed === true, retentionNotes, exceptionReason: failing.length ? exceptionReason : '', checklist, closedBy: actor }, at, requestId, { sql: 'SELECT 1 FROM projects WHERE id = ? AND last_request_id = ?', args: [project.id, requestId] }),
+    activity(actor, at, 'project', String(project.id), { type: failing.length ? 'project.closed_with_exception' : 'project.closed', summary: failing.length ? `Project closed with an owner exception (${failing.length} checklist items open)` : 'Project closed after completing the closeout checklist', details: { failing: failing.map(c => c.key) } }, 'projects', requestId),
+  ]);
+  return results[0].meta.changes ? { status: 200, body: { record: await getRecord('project', String(project.id)), checklist } } : conflict(await getRecord('project', String(project.id)));
+}
+
+// ── Experience records ──────────────────────────────────────────────────────
+
+/** Latest closeout for a project (earlier closeouts of reopened projects are kept). */
+const latestCloseout = (all: Values[], projectId: string) => all.filter(c => c.projectId === projectId).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
+
+async function createExperience(body: Body, actor: string): Promise<StoreResult<unknown>> {
+  const project = await getRecord('project', str(body.projectId));
+  if (!project) return bad('Project not found.', 404);
+  const existing = await db().prepare('SELECT id FROM experience_records WHERE project_id = ?').bind(project.id).first<Row>();
+  if (existing) return { status: 200, body: { record: await getRecord('experience', String(existing.id)), alreadyCreated: true } };
+  const closeout = latestCloseout(await listRecords('closeout'), String(project.id));
+  if (project.status !== 'Closed' || !closeout || closeout.outcome !== 'Completed') return bad('Experience records come only from projects closed as completed (not cancelled).', 409);
+  const versions = await listRecords('deliverableVersion');
+  const verified = (await listRecords('deliverable')).filter(d => d.projectId === project.id && d.acceptedVersionId).map(d => {
+    const v = versions.find(x => x.id === d.acceptedVersionId);
+    return { deliverableId: d.id, title: d.title, versionId: d.acceptedVersionId, versionNumber: v?.number ?? null, acceptanceKind: v?.acceptanceKind ?? '', acceptanceEvidenceId: v?.acceptanceEvidenceId ?? null };
+  });
+  const id = crypto.randomUUID(), at = nowIso(), requestId = crypto.randomUUID();
+  try {
+    await db().batch([
+      insertStatement(SPECS.experience, id, { projectId: project.id, title: project.title, clientLabel: '', actualScope: project.scope, startDate: project.startDate, endDate: project.actualEndDate, outcomes: '', lessonsLearned: closeout.lessonsLearned, permissionReference: '', permissionEvidenceId: null, verifiedDeliverables: verified, publicationStatus: 'Private', reviewedBy: '', reviewedAt: '', provenance: {} }, at, requestId),
+      activity(actor, at, 'experience', id, { type: 'experience.created', summary: 'Private experience record created from a completed project' }, 'experience_records', requestId),
+    ]);
+  } catch (error) {
+    if (/UNIQUE constraint failed/i.test(String(error))) { const row = await db().prepare('SELECT id FROM experience_records WHERE project_id = ?').bind(project.id).first<Row>(); if (row) return { status: 200, body: { record: await getRecord('experience', String(row.id)), alreadyCreated: true } }; }
+    throw error;
+  }
+  return { status: 201, body: { record: await getRecord('experience', id), alreadyCreated: false } };
+}
+
+/** Owner review of an experience record. Approval snapshots the provenance of every claim. */
+async function reviewExperience(body: Body, actor: string): Promise<StoreResult<unknown>> {
+  const exp = await getRecord('experience', str(body.id));
+  if (!exp) return bad('Experience record not found.', 404);
+  if (!isVersion(body.version) || exp.version !== body.version) return conflict(exp);
+  const to = str(body.to), reason = str(body.reason).trim();
+  const allowed: Record<string, string[]> = { Private: ['Ready for owner review'], 'Ready for owner review': ['Approved for capability statement', 'Private'], 'Approved for capability statement': ['Withdrawn', 'Private'], Withdrawn: ['Private'] };
+  if (!(allowed[String(exp.publicationStatus)] ?? []).includes(to)) return bad(`An experience record cannot move from ${exp.publicationStatus} to ${to}.`, 409);
+  if (to === 'Withdrawn' && !reason) return bad('Record why the approval is withdrawn.');
+  let provenance: Values = (exp.provenance as Values) ?? {};
+  if (to === 'Approved for capability statement') {
+    const today = businessDate();
+    const project = await getRecord('project', String(exp.projectId));
+    const closeout = latestCloseout(await listRecords('closeout'), String(exp.projectId));
+    const verified = (exp.verifiedDeliverables as Values[]) ?? [];
+    const outcomeEvidence = (await db().prepare("SELECT e.* FROM evidence e JOIN evidence_links l ON l.evidence_id = e.id WHERE l.subject_type = 'experience' AND l.subject_id = ?").bind(exp.id).all<Row>()).results;
+    const currentOutcomeEvidence = outcomeEvidence.filter(e => evidenceState({ reviewStatus: e.review_status, reviewDate: e.review_date }, today) === 'current');
+    const permission = exp.permissionEvidenceId ? await getRecord('evidence', String(exp.permissionEvidenceId)) : null;
+    if (!String(exp.clientLabel).trim()) return bad('Describe how the client is named (a generic description unless permission allows naming them).');
+    if (!verified.length) return bad('Only experience with at least one accepted deliverable can be approved.');
+    if (String(exp.outcomes).trim() && !currentOutcomeEvidence.length) return bad('Link verified evidence for the measured outcomes, or remove the outcomes.');
+    if (!(permission && evidenceState(permission, today) === 'current') && !String(exp.permissionReference).trim()) return bad('Record the client’s permission (verified evidence or a reference) before approving use.');
+    provenance = { projectId: exp.projectId, opportunityId: project?.opportunityId ?? null, proposalVersionId: project?.proposalVersionId ?? null, submissionId: project?.submissionId ?? null, awardEvidenceId: project?.awardEvidenceId ?? null, closeoutId: closeout?.id ?? null, closeoutException: closeout?.exceptionReason || null, acceptedDeliverables: verified, outcomeEvidenceIds: currentOutcomeEvidence.map(e => e.id), permission: { reference: exp.permissionReference, evidenceId: exp.permissionEvidenceId }, approvedBy: actor, approvedAt: nowIso() };
+  }
+  const at = nowIso(), requestId = crypto.randomUUID();
+  const results = await db().batch([
+    db().prepare('UPDATE experience_records SET publication_status = ?, reviewed_by = ?, reviewed_at = ?, provenance = ?, version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND version = ?')
+      .bind(to, to === 'Approved for capability statement' ? actor : exp.reviewedBy, to === 'Approved for capability statement' ? at : exp.reviewedAt, JSON.stringify(provenance), at, requestId, exp.id, exp.version),
+    activity(actor, at, 'experience', String(exp.id), { type: 'experience.review', summary: `Experience record: ${exp.publicationStatus} → ${to}${to === 'Approved for capability statement' ? ' (owner review; provenance recorded; not published to the website)' : ''}`, details: { to, reason: reason.slice(0, 200) } }, 'experience_records', requestId),
+  ]);
+  return results[0].meta.changes ? { status: 200, body: { record: await getRecord('experience', String(exp.id)) } } : conflict(await getRecord('experience', String(exp.id)));
+}
+
 export const ACTIONS: Record<string, Action> = {
+  'deliverable.submitForReview': submitDeliverable,
+  'deliverable.requestChanges': (b, a) => reviewDeliverable(b, a, 'changes'),
+  'deliverable.accept': (b, a) => reviewDeliverable(b, a, 'accept'),
+  'changeRequest.decide': decideChange,
+  'project.closeout': closeoutProject,
+  'experience.createFromProject': createExperience,
+  'experience.review': reviewExperience,
   'project.createFromAward': createProjectFromAward,
   'project.transition': transitionProject,
   'proposal.create': createProposal,

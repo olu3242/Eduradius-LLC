@@ -7,6 +7,7 @@ import type { OpportunityRecord } from '../../lib/workflow';
 import { Alert, DueChip, StatusBadge, type Workflow } from './workflow';
 import { EvidenceLinks, RecordDialog, recs, saver, Tabs, type PursuitTab } from './records-ui';
 import { Dialog } from './pursuit-ui';
+import { DeliverablesPanel } from './delivery-ui';
 
 const str = (v: unknown) => (typeof v === 'string' ? v : v === null || v === undefined ? '' : String(v));
 
@@ -143,8 +144,7 @@ export function ProjectView({ wf, projectId, onBack, onOpenPursuit, extraTabs = 
       { id: 'milestones', label: 'Milestones', render: () => <section className="panel followup-section"><RecordList wf={wf} type="milestone" projectId={pid} title={title} empty="Plan milestones with owners, dates, dependencies and completion criteria." refOptions={{ milestone: msOptions() }}
         render={m => <><strong>{str(m.title)}</strong><small>{str(m.owner) || 'No owner'} · planned {str(m.plannedDate) || '—'}{m.actualDate ? ` · completed ${str(m.actualDate)}` : ''}{(m.dependsOn as string[]).length ? ` · depends on ${(m.dependsOn as string[]).map(id => str(milestones.find(x => x.id === id)?.title)).join(', ')}` : ''}</small>
           <span className="chip-row"><StatusBadge status={str(m.status)} />{m.status !== 'Complete' ? <DueChip due={(m.plannedDate as string | null) ?? null} today={today} /> : null}</span>{m.completionCriteria ? <small>Done when: {str(m.completionCriteria)}</small> : null}</>} /></section> },
-      { id: 'deliverables', label: 'Deliverables', render: () => <section className="panel followup-section"><RecordList wf={wf} type="deliverable" projectId={pid} title={title} empty="Add the deliverables this project owes." refOptions={{ milestone: msOptions() }}
-        render={d => <><strong>{str(d.title)}</strong><small>{str(d.owner) || 'No owner'} · due {str(d.dueDate) || '—'} · {d.required ? 'Required' : 'Optional'}</small><span className="chip-row"><StatusBadge status={str(d.status)} />{d.status !== 'Accepted' ? <DueChip due={(d.dueDate as string | null) ?? null} today={today} /> : null}</span></>} /></section> },
+      { id: 'deliverables', label: 'Deliverables', render: () => <section className="panel followup-section"><DeliverablesPanel wf={wf} project={project} /></section> },
       { id: 'log', label: 'Risks & issues', render: () => <section className="panel followup-section"><RecordList wf={wf} type="projectLog" projectId={pid} title={title} empty="Track risks, issues, decisions and actions."
         render={l => <><strong>{str(l.kind)}: {str(l.title)}</strong><small>{str(l.owner) || 'No owner'} · severity {str(l.severity)}</small><span className="chip-row"><StatusBadge status={str(l.status)} />{['Open', 'Monitoring'].includes(str(l.status)) ? <DueChip due={(l.dueDate as string | null) ?? null} today={today} /> : null}</span>{l.resolution ? <small>Resolution: {str(l.resolution)}</small> : null}</>} /></section> },
       ...extraTabs(project),

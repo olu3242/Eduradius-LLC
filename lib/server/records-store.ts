@@ -125,6 +125,15 @@ export const HOOKS: Record<string, Hook> = {
   projectLog: {
     validate: async v => (await projectLocked(v.projectId)) ?? (['Resolved', 'Closed'].includes(String(v.status)) && !String(v.resolution).trim() ? 'Record the resolution or decision rationale before closing this entry.' : null),
   },
+  changeRequest: {
+    validate: async (v, current) => (current && current.status !== 'Proposed' ? 'A decided change request is kept exactly as recorded.' : await projectLocked(v.projectId)),
+  },
+  experience: {
+    // Any edit after approval withdraws the approval until the owner reviews it again.
+    adjust: (v, current, changed) => current.publicationStatus === 'Approved for capability statement' && changed.length
+      ? { value: { ...v, publicationStatus: 'Private' }, events: [{ type: 'experience.approval_withdrawn', summary: 'Edited after approval — returned to private until reviewed again' }] }
+      : { value: v },
+  },
   teamingPartner: {
     validate: async v => (v.discussionStatus === 'Agreement signed' && !String(v.agreementReference).trim() ? 'Record the agreement reference before marking an agreement signed.'
       : v.nextActionDue && !String(v.nextAction).trim() ? 'Describe the next action before setting a due date.' : null),

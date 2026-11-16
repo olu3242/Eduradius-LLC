@@ -320,3 +320,79 @@ export const projectLog = sqliteTable('project_log', {
   resolution: text('resolution').notNull().default(''),
   ...recordColumns(),
 }, t => [index('project_log_project_idx').on(t.projectId)]);
+
+// ── Acceptance, change control, closeout, experience (migration 0006) ──
+export const deliverableVersions = sqliteTable('deliverable_versions', {
+  id: text('id').primaryKey(),
+  deliverableId: text('deliverable_id').notNull(),
+  number: integer('number').notNull(),
+  title: text('title').notNull().default(''),
+  summary: text('summary').notNull().default(''),
+  evidenceIds: text('evidence_ids').notNull().default('[]'),
+  status: text('status').notNull(),
+  submittedBy: text('submitted_by').notNull().default(''),
+  submittedAt: text('submitted_at').notNull().default(''),
+  reviewNotes: text('review_notes').notNull().default(''),
+  reviewedBy: text('reviewed_by').notNull().default(''),
+  reviewedAt: text('reviewed_at').notNull().default(''),
+  acceptanceKind: text('acceptance_kind').notNull().default(''),
+  acceptanceAuthority: text('acceptance_authority').notNull().default(''),
+  acceptanceEvidenceId: text('acceptance_evidence_id'),
+  ...recordColumns(),
+}, t => [uniqueIndex('deliverable_versions_number_uq').on(t.deliverableId, t.number)]);
+
+export const changeRequests = sqliteTable('change_requests', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  title: text('title').notNull(),
+  requestedChange: text('requested_change').notNull(),
+  reason: text('reason').notNull(),
+  scopeImpact: text('scope_impact').notNull().default(''),
+  newScope: text('new_scope').notNull().default(''),
+  scheduleImpact: text('schedule_impact').notNull().default(''),
+  newPlannedEndDate: text('new_planned_end_date'),
+  costImpact: text('cost_impact').notNull().default(''),
+  decisionOwner: text('decision_owner').notNull().default(''),
+  agreementReference: text('agreement_reference').notNull().default(''),
+  status: text('status').notNull().default('Proposed'),
+  decisionReason: text('decision_reason').notNull().default(''),
+  decidedBy: text('decided_by').notNull().default(''),
+  decidedAt: text('decided_at').notNull().default(''),
+  resultingBaselineId: text('resulting_baseline_id'),
+  ...recordColumns(),
+}, t => [index('change_requests_project_idx').on(t.projectId)]);
+
+export const projectCloseouts = sqliteTable('project_closeouts', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  outcome: text('outcome').notNull(),
+  lessonsLearned: text('lessons_learned').notNull().default(''),
+  finalAcceptanceEvidenceId: text('final_acceptance_evidence_id'),
+  archiveReviewed: integer('archive_reviewed').notNull().default(0),
+  retentionNotes: text('retention_notes').notNull().default(''),
+  exceptionReason: text('exception_reason').notNull().default(''),
+  checklist: text('checklist').notNull().default('[]'),
+  closedBy: text('closed_by').notNull().default(''),
+  ...recordColumns(),
+}, t => [index('project_closeouts_project_idx').on(t.projectId)]); // every closeout is kept (projects can be reopened)
+
+// Private by default; provenance is snapshotted when the owner approves use.
+export const experienceRecords = sqliteTable('experience_records', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  title: text('title').notNull(),
+  clientLabel: text('client_label').notNull().default(''),
+  actualScope: text('actual_scope').notNull().default(''),
+  startDate: text('start_date'),
+  endDate: text('end_date'),
+  outcomes: text('outcomes').notNull().default(''),
+  lessonsLearned: text('lessons_learned').notNull().default(''),
+  permissionReference: text('permission_reference').notNull().default(''),
+  permissionEvidenceId: text('permission_evidence_id'),
+  verifiedDeliverables: text('verified_deliverables').notNull().default('[]'),
+  publicationStatus: text('publication_status').notNull().default('Private'),
+  reviewedBy: text('reviewed_by').notNull().default(''),
+  reviewedAt: text('reviewed_at').notNull().default(''),
+  provenance: text('provenance').notNull().default('{}'),
+  ...recordColumns(),
+}, t => [uniqueIndex('experience_records_project_uq').on(t.projectId)]);

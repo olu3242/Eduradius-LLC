@@ -97,6 +97,36 @@ export function findCycle(milestones: { id: string; dependsOn: string[] }[]): st
   return null;
 }
 
+// ── Increment 4: acceptance, change control, closeout, experience ─────────
+export const DELIVERABLE_VERSION_STATUSES = ['Ready for review', 'Changes requested', 'Accepted', 'Superseded'] as const;
+/** Internal approval is never presented as client acceptance. */
+export const ACCEPTANCE_KINDS = ['Internal approval', 'Client acceptance'] as const;
+export const CHANGE_STATUSES = ['Proposed', 'Approved', 'Rejected', 'Withdrawn'] as const;
+export const PUBLICATION_STATUSES = ['Private', 'Ready for owner review', 'Approved for capability statement', 'Withdrawn'] as const;
+
+export type CloseoutCheck = { key: string; label: string; passed: boolean; detail: string };
+/** Closeout prerequisites shared by the UI and the server. */
+export function closeoutChecklist(projectId: string, records: Record<string, Values[]>, input: { finalAcceptanceEvidenceId?: string | null; lessonsLearned?: string; archiveReviewed?: boolean }, today: string): CloseoutCheck[] {
+  const of = (type: string) => (records[type] ?? []).filter(r => r.projectId === projectId);
+  const project = (records.project ?? []).find(p => p.id === projectId);
+  const required = of('deliverable').filter(d => d.required);
+  const notAccepted = required.filter(d => d.status !== 'Accepted');
+  const unresolved = of('projectLog').filter(l => ['Risk', 'Issue'].includes(String(l.kind)) && ['Open', 'Monitoring'].includes(String(l.status)));
+  const openActions = of('projectLog').filter(l => l.kind === 'Action' && ['Open', 'Monitoring'].includes(String(l.status)));
+  const openMilestones = of('milestone').filter(m => m.status !== 'Complete');
+  const pendingChanges = of('changeRequest').filter(c => c.status === 'Proposed');
+  const evidence = (records.evidence ?? []).find(e => e.id === input.finalAcceptanceEvidenceId);
+  const obligations = openActions.length + openMilestones.length + pendingChanges.length + (project?.nextAction ? 1 : 0);
+  return [
+    { key: 'deliverables', label: 'Required deliverables accepted', passed: notAccepted.length === 0, detail: notAccepted.length ? `${notAccepted.length} of ${required.length} required deliverables not accepted` : `${required.length} required deliverables accepted` },
+    { key: 'issues', label: 'No unresolved risks or issues', passed: unresolved.length === 0, detail: unresolved.length ? `${unresolved.length} open risks or issues` : 'None open' },
+    { key: 'obligations', label: 'No outstanding actions or obligations', passed: obligations === 0, detail: obligations ? `${openActions.length} open actions, ${openMilestones.length} incomplete milestones, ${pendingChanges.length} undecided changes${project?.nextAction ? ', a project next action' : ''}` : 'None outstanding' },
+    { key: 'acceptance', label: 'Final acceptance evidence recorded', passed: Boolean(evidence && evidenceState(evidence, today) === 'current'), detail: evidence ? `${String(evidence.title)} (${evidenceState(evidence, today)})` : 'No verified final acceptance evidence selected' },
+    { key: 'lessons', label: 'Lessons learned captured', passed: Boolean(input.lessonsLearned?.trim()), detail: input.lessonsLearned?.trim() ? 'Recorded' : 'Not recorded' },
+    { key: 'archive', label: 'Archive and retention reviewed', passed: Boolean(input.archiveReviewed), detail: input.archiveReviewed ? 'Reviewed' : 'Not reviewed' },
+  ];
+}
+
 export type Section = { body: string; basis: string; refs: string[] };
 export type Sections = Record<string, Section>;
 
@@ -320,6 +350,80 @@ export const SPECS: Record<string, TypeSpec> = {
       f('status', 'Status', 'enum', { options: LOG_STATUSES, default: 'Open' }),
       f('dueDate', 'Due / next action date', 'date'),
       f('resolution', 'Resolution / decision rationale', 'longtext', { max: 4000 }),
+    ],
+  },
+  deliverableVersion: {
+    type: 'deliverableVersion', table: 'deliverable_versions', label: 'Deliverable version', plural: 'Deliverable versions', titleKey: 'number', actionOnly: true,
+    fields: [
+      f('deliverableId', 'Deliverable', 'ref', { ref: 'deliverable', readOnly: true }),
+      f('number', 'Version', 'int', { readOnly: true }),
+      f('title', 'Title', 'text', { readOnly: true }),
+      f('summary', 'Submitted content', 'longtext', { readOnly: true }),
+      f('evidenceIds', 'Evidence at submission', 'refs', { ref: 'evidence', readOnly: true }),
+      f('status', 'Status', 'enum', { options: DELIVERABLE_VERSION_STATUSES, readOnly: true }),
+      f('submittedBy', 'Submitted for review by', 'text', { readOnly: true }),
+      f('submittedAt', 'Submitted at', 'text', { readOnly: true }),
+      f('reviewNotes', 'Review notes', 'longtext', { readOnly: true }),
+      f('reviewedBy', 'Reviewed by', 'text', { readOnly: true }),
+      f('reviewedAt', 'Reviewed at', 'text', { readOnly: true }),
+      f('acceptanceKind', 'Acceptance type', 'text', { readOnly: true }),
+      f('acceptanceAuthority', 'Acceptance authority', 'text', { readOnly: true }),
+      f('acceptanceEvidenceId', 'Acceptance evidence', 'ref', { ref: 'evidence', readOnly: true }),
+    ],
+  },
+  changeRequest: {
+    type: 'changeRequest', table: 'change_requests', label: 'Change request', plural: 'Change requests', titleKey: 'title',
+    fields: [
+      f('projectId', 'Project', 'ref', { ref: 'project', required: true, immutable: true }),
+      f('title', 'Change', 'text', { max: 200, required: true }),
+      f('requestedChange', 'Requested change', 'longtext', { max: 4000, required: true }),
+      f('reason', 'Reason for the change', 'longtext', { max: 4000, required: true }),
+      f('scopeImpact', 'Scope impact', 'longtext', { max: 4000 }),
+      f('newScope', 'Proposed baseline scope (if scope changes)', 'longtext', { max: 8000, hint: 'Leave blank to keep the current baseline scope.' }),
+      f('scheduleImpact', 'Schedule impact', 'longtext', { max: 2000 }),
+      f('newPlannedEndDate', 'Proposed planned completion', 'date'),
+      f('costImpact', 'Cost impact (narrative)', 'longtext', { max: 2000, hint: 'Operational note only — not accounting, invoicing or a price commitment.' }),
+      f('decisionOwner', 'Decision owner', 'text', { max: 120 }),
+      f('agreementReference', 'Supporting agreement reference', 'text', { max: 200 }),
+      f('status', 'Decision', 'enum', { options: CHANGE_STATUSES, default: 'Proposed', readOnly: true }),
+      f('decisionReason', 'Decision rationale', 'longtext', { readOnly: true }),
+      f('decidedBy', 'Decided by', 'text', { readOnly: true }),
+      f('decidedAt', 'Decided at', 'text', { readOnly: true }),
+      f('resultingBaselineId', 'Resulting baseline', 'ref', { ref: 'projectBaseline', readOnly: true }),
+    ],
+  },
+  closeout: {
+    type: 'closeout', table: 'project_closeouts', label: 'Closeout', plural: 'Closeouts', titleKey: 'outcome', actionOnly: true,
+    fields: [
+      f('projectId', 'Project', 'ref', { ref: 'project', readOnly: true }),
+      f('outcome', 'Outcome', 'text', { readOnly: true }),
+      f('lessonsLearned', 'Lessons learned', 'longtext', { readOnly: true }),
+      f('finalAcceptanceEvidenceId', 'Final acceptance evidence', 'ref', { ref: 'evidence', readOnly: true }),
+      f('archiveReviewed', 'Archive reviewed', 'bool', { readOnly: true }),
+      f('retentionNotes', 'Retention notes', 'longtext', { readOnly: true }),
+      f('exceptionReason', 'Owner exception', 'longtext', { readOnly: true }),
+      f('checklist', 'Checklist at closeout', 'json', { readOnly: true }),
+      f('closedBy', 'Closed by', 'text', { readOnly: true }),
+    ],
+  },
+  experience: {
+    type: 'experience', table: 'experience_records', label: 'Experience record', plural: 'Experience records', titleKey: 'title', createViaAction: true,
+    fields: [
+      f('projectId', 'Project', 'ref', { ref: 'project', readOnly: true }),
+      f('title', 'Title', 'text', { max: 200, required: true }),
+      f('clientLabel', 'How the client is named', 'text', { max: 200, hint: 'Use a generic description unless the client has given permission to be named.' }),
+      f('actualScope', 'Actual scope delivered', 'longtext', { max: 8000 }),
+      f('startDate', 'Start date', 'date'),
+      f('endDate', 'Completion date', 'date'),
+      f('outcomes', 'Measured outcomes', 'longtext', { max: 4000, hint: 'Only measured results you can evidence. Never estimate savings, ratings or endorsements.' }),
+      f('lessonsLearned', 'Lessons learned', 'longtext', { max: 4000 }),
+      f('permissionReference', 'Client permission reference', 'text', { max: 200 }),
+      f('permissionEvidenceId', 'Client permission evidence', 'ref', { ref: 'evidence' }),
+      f('verifiedDeliverables', 'Verified deliverables', 'json', { readOnly: true }),
+      f('publicationStatus', 'Use status', 'enum', { options: PUBLICATION_STATUSES, default: 'Private', readOnly: true }),
+      f('reviewedBy', 'Reviewed by', 'text', { readOnly: true }),
+      f('reviewedAt', 'Reviewed at', 'text', { readOnly: true }),
+      f('provenance', 'Provenance', 'json', { readOnly: true }),
     ],
   },
 };
