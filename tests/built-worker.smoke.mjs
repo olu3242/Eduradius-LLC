@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
@@ -30,7 +30,8 @@ async function worker(mode) {
     rmSync(state, { recursive: true, force: true });
   };
   try {
-    for (const file of ['drizzle/0000_wonderful_exiles.sql', 'drizzle/0001_access_protection.sql']) {
+    // Apply every migration in order, exactly as an environment upgrade would.
+    for (const file of readdirSync('drizzle').filter(f => /^\d{4}_.+\.sql$/.test(f)).sort().map(f => 'drizzle/' + f)) {
       const result = spawnSync(process.execPath, [cli, 'd1', 'execute', 'DB', '--local', '--config', config, '--persist-to', state, '--file', file], { env: localEnv, encoding: 'utf8', timeout: 30000 });
       assert.equal(result.status, 0, result.stderr + result.stdout);
     }
@@ -54,7 +55,7 @@ async function worker(mode) {
   } catch (error) { await stop(); throw error; }
 }
 
-test('built Worker: public intake, token session, persistence and body rejection', { timeout: 120000 }, async () => {
+test('built Worker: public intake, token session, conversion, persistence and body rejection', { timeout: 120000 }, async () => {
   const app = await worker('token');
   try {
     const get = path => fetch(app.base + path);
@@ -69,12 +70,32 @@ test('built Worker: public intake, token session, persistence and body rejection
     const inquiry = await fetch(app.base + '/api/inquiries', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Smoke Test', organization: 'Local Test', email: 'smoke@example.com', sector: 'Education', scope: 'Local persistence check', kind: 'Project briefing' }) });
     assert.equal(inquiry.status, 201);
     const stored = await (await owner()).json();
-    assert.equal(stored.data.inquiries[0].scope, 'Local persistence check');
-    assert.ok(!JSON.stringify(await (await get('/api/site')).json()).includes('smoke@example.com'));
+    assert.ok(!('inquiries' in (stored.data ?? {})), 'inquiries are not copied into the workspace document');
+    const json = (path, init = {}) => fetch(app.base + path, { ...init, headers: { cookie, 'content-type': 'application/json', ...(init.headers ?? {}) } });
+    let flow = await (await json('/api/workflow')).json();
+    let lead = flow.inquiries[0];
+    assert.equal(lead.scope, 'Local persistence check'); assert.equal(lead.status, 'New');
+    assert.equal(flow.notifications[0].emailStatus, 'disabled');
+    const qualify = await json(`/api/inquiries/${lead.id}`, { method: 'PATCH', body: JSON.stringify({ version: lead.version, changes: { status: 'Qualified', reason: 'Smoke qualification', assignee: 'Smoke owner' } }) });
+    assert.equal(qualify.status, 200);
+    lead = (await qualify.json()).inquiry;
+    const draft = { title: 'Smoke opportunity', agency: 'Local Test', contactEmail: 'smoke@example.com', stage: 'Qualify' };
+    const convert = () => json(`/api/inquiries/${lead.id}/convert`, { method: 'POST', body: JSON.stringify({ version: lead.version, opportunity: draft }) });
+    const [first, second] = await Promise.all([convert(), convert()]);
+    assert.deepEqual([first.status, second.status].sort(), [200, 201], 'one conversion succeeds; the concurrent duplicate returns the existing record');
+    flow = await (await json('/api/workflow')).json();
+    assert.equal(flow.opportunities.filter(o => o.sourceInquiryId === lead.id).length, 1);
+    assert.equal(flow.inquiries[0].status, 'Converted');
+    assert.ok(flow.activity.some(a => a.type === 'inquiry.converted' && a.actor === 'token:session'));
+    const publicText = JSON.stringify(await (await get('/api/site')).json());
+    for (const secret of ['smoke@example.com', 'Smoke opportunity', 'Smoke qualification']) assert.ok(!publicText.includes(secret));
+    assert.equal((await fetch(app.base + '/api/workflow')).status, 401, 'anonymous workflow access denied');
     const oversize = await fetch(app.base + '/api/workspace', { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ data: 'x'.repeat(700001), revision: 1 }) });
     assert.equal(oversize.status, 413);
     assert.equal((await owner()).status, 200, 'next request remains usable after oversize rejection');
-    const updated = { ...stored.data, profile: { ...stored.data.profile, name: 'Saved in built Worker' } };
+    // Intake no longer creates the planning document; the owner's first save does.
+    const base = stored.data ?? { profile: {}, codes: [], documents: [] };
+    const updated = { ...base, profile: { ...base.profile, name: 'Saved in built Worker' } };
     const saved = await fetch(app.base + '/api/workspace', { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ data: updated, revision: stored.revision }) });
     assert.equal(saved.status, 200);
     assert.equal((await (await owner()).json()).data.profile.name, 'Saved in built Worker');
@@ -85,6 +106,7 @@ test('built Worker: unconfigured owner access fails closed', { timeout: 120000 }
   const app = await worker('unconfigured');
   try {
     assert.equal((await fetch(app.base + '/api/workspace')).status, 503);
+    assert.equal((await fetch(app.base + '/api/workflow')).status, 503);
     assert.equal((await fetch(app.base + '/api/site')).status, 200);
     assert.equal((await (await fetch(app.base + '/api/auth/session')).json()).authenticated, false);
   } finally { await app.stop(); }

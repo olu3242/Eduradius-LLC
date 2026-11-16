@@ -1,14 +1,13 @@
 import { clientAddress, crossSiteRejection, json, logEvent, readJson } from '../../../lib/server/http';
 import { consume, LIMITS } from '../../../lib/server/rate-limit';
-import { MAX_WORKSPACE_BYTES, readWorkspace, writeWorkspace } from '../../../lib/server/workspace-store';
-import { initialWorkspace } from '../../../lib/workspace';
+import { createPublicInquiry } from '../../../lib/server/workflow-store';
 import { isInquiryKind } from '../../../lib/inquiry';
 export const dynamic = 'force-dynamic';
 
-// Public, append-only intake. Visitors can add one inquiry; they can never read or
-// replace the workspace.
-const MAX_INQUIRIES = 500;
+// Public, append-only intake into the `inquiries` table. Visitors can add one inquiry;
+// they can never read records or set status, assignment or review fields.
 const LIMITS_BY_FIELD = { name: 120, organization: 160, email: 254, sector: 80, scope: 4000 } as const;
+const ALLOWED_KEYS = new Set([...Object.keys(LIMITS_BY_FIELD), 'kind', 'website']);
 type Body = Partial<Record<keyof typeof LIMITS_BY_FIELD | 'kind' | 'website', unknown>>;
 
 function validate(body: Body) {
@@ -20,14 +19,16 @@ function validate(body: Body) {
   }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(out.email)) return null;
   const kind = isInquiryKind(body.kind) ? body.kind : null;
-  return kind ? { ...out, kind } : null;
+  return kind ? { name: out.name, organization: out.organization, email: out.email, sector: out.sector, scope: out.scope, kind } : null;
 }
 
 export async function POST(request: Request) {
   const rejected = await crossSiteRejection(request); if (rejected) return rejected;
   const body = await readJson<Body>(request, 16000);
   if (body === 'too_large') return json({ error: 'Request is too large.' }, 413);
-  if (!body || typeof body !== 'object') return json({ error: 'Please complete all required fields.' }, 400);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return json({ error: 'Please complete all required fields.' }, 400);
+  // Internal workflow fields (status, assignee, notes, ...) are never accepted from the public.
+  if (Object.keys(body).some(key => !ALLOWED_KEYS.has(key))) return json({ error: 'The request contained unsupported fields.' }, 400);
   const fields = validate(body);
   if (!fields) return json({ error: 'Please complete all required fields with a valid email address.' }, 400);
   const accepted = { message: 'Your request has been saved to the EduRadius workspace for review. No email has been sent.' };
@@ -39,22 +40,13 @@ export async function POST(request: Request) {
     if (!limit.allowed) return json({ error: 'Too many requests. Please try again later.' }, 429, { 'Retry-After': String(limit.retryAfter) });
   } catch (e) { logEvent('ratelimit.error', { bucket: 'inquiry', message: String(e) }); return json({ error: 'Requests are temporarily unavailable. Please try again later.' }, 503); }
 
-  const inquiry = { id: crypto.randomUUID(), ...fields, createdAt: new Date().toISOString(), status: 'Awaiting review', notes: '' };
   try {
-    // Append with optimistic concurrency; retry if the owner saved in between.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const { data, revision } = await readWorkspace();
-      const next = { ...initialWorkspace(), ...(data || {}) } as Record<string, unknown> & { inquiries: unknown[] };
-      const existing = Array.isArray(next.inquiries) ? next.inquiries : [];
-      if (existing.length >= MAX_INQUIRIES) { logEvent('inquiry.capacity', { count: existing.length }); throw new Error('capacity'); }
-      next.inquiries = [inquiry, ...existing];
-      if (JSON.stringify(next).length > MAX_WORKSPACE_BYTES) { logEvent('inquiry.capacity', { reason: 'size' }); throw new Error('capacity'); }
-      const saved = await writeWorkspace(next, revision);
-      if (saved) { logEvent('inquiry.created', { id: inquiry.id, kind: inquiry.kind, revision: saved.revision }); return json({ ...accepted, id: inquiry.id }, 201); }
-    }
-    return json({ error: 'The workspace is busy. Please try again.' }, 503);
+    const created = await createPublicInquiry(fields);
+    if (!created) { logEvent('inquiry.capacity'); return json({ error: 'Requests are temporarily unavailable. Please try again later.' }, 503); }
+    logEvent('inquiry.created', { id: created.id, kind: fields.kind });
+    return json({ ...accepted, id: created.id }, 201);
   } catch (e) {
-    if (String(e) !== 'Error: capacity') logEvent('inquiry.error', { message: String(e) });
+    logEvent('inquiry.error', { message: String(e) });
     return json({ error: 'Requests are temporarily unavailable. Please try again later.' }, 503);
   }
 }

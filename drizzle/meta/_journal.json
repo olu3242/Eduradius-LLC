@@ -15,6 +15,13 @@
       "when": 1794799899793,
       "tag": "0001_access_protection",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794803215062,
+      "tag": "0002_connected_workflow",
+      "breakpoints": true
     }
   ]
 }

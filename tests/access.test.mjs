@@ -130,28 +130,31 @@ test('public endpoint never exposes stored inquiries', async () => {
   const response = await site.GET(); assert.equal(response.status, 200);
   assert.ok(!(await response.text()).includes('secret inquiry'));
 });
-test('public intake appends and preserves owner data', async () => {
+const storedInquiries = async () => (await db.prepare('SELECT * FROM inquiries ORDER BY created_at').all()).results;
+test('public intake appends to the inquiries table and leaves the owner document untouched', async () => {
   const data = initialWorkspace(); data.profile.owner = 'Owner only';
   await writeWorkspace(data, 0);
   assert.equal((await inquiries.POST(request('/api/inquiries', 'POST', inquiry))).status, 201);
   const stored = await readWorkspace();
-  assert.equal(stored.data.profile.owner, 'Owner only'); assert.equal(stored.data.inquiries.length, 1);
-  assert.equal(stored.data.inquiries[0].scope, inquiry.scope); assert.equal(stored.revision, 2);
+  assert.equal(stored.data.profile.owner, 'Owner only'); assert.equal(stored.revision, 1);
+  assert.ok(!('inquiries' in stored.data));
+  const rows = await storedInquiries();
+  assert.equal(rows.length, 1); assert.equal(rows[0].scope, inquiry.scope); assert.equal(rows[0].status, 'New');
 });
 test('honeypot returns success without storing a request', async () => {
   assert.equal((await inquiries.POST(request('/api/inquiries', 'POST', { ...inquiry, website: 'bot' }))).status, 201);
-  assert.equal((await readWorkspace()).revision, 0);
+  assert.equal((await storedInquiries()).length, 0);
 });
 test('invalid public intake returns 400 without writing', async () => {
   for (const body of [null, [], {}, { ...inquiry, email: 'bad' }, { ...inquiry, kind: 'unexpected' }]) {
     assert.equal((await inquiries.POST(request('/api/inquiries', 'POST', body))).status, 400);
   }
-  assert.equal((await readWorkspace()).revision, 0);
+  assert.equal((await storedInquiries()).length, 0);
 });
 test('intake accepts five requests per client then rejects the sixth', async () => {
   for (let i = 0; i < 5; i++) assert.equal((await inquiries.POST(request('/api/inquiries', 'POST', inquiry))).status, 201);
   assert.equal((await inquiries.POST(request('/api/inquiries', 'POST', inquiry))).status, 429);
-  assert.equal((await readWorkspace()).data.inquiries.length, 5);
+  assert.equal((await storedInquiries()).length, 5);
 });
 test('database outage fails closed for login and intake', async () => {
   delete env.DB;
@@ -196,8 +199,8 @@ for (const kind of INQUIRY_KINDS) {
   test(`public form request type persists: ${kind}`, async () => {
     const response = await inquiries.POST(request('/api/inquiries', 'POST', { ...inquiry, kind, sector: 'Education & learning' }));
     assert.equal(response.status, 201);
-    const stored = await readWorkspace();
-    assert.equal(stored.data.inquiries[0].kind, kind);
-    assert.equal(stored.data.inquiries[0].sector, 'Education & learning');
+    const [stored] = await storedInquiries();
+    assert.equal(stored.kind, kind);
+    assert.equal(stored.sector, 'Education & learning');
   });
 }
