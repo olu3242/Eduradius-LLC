@@ -99,3 +99,16 @@ The browser journey covered:
 - a formal WCAG conformance assessment.
 
 The browser journey is a local script, not part of CI.
+
+## Iterations 4–5: Stages 3–4 and the release candidate (local only)
+
+Stages 3–4 (contracting and delivery) were built in four committed increments (`0c8c293`, `83c0564`, `f204304`, `56ab3f2`) and documented in [CONTRACTING.md](CONTRACTING.md). The release candidate **`36ce7a1`** adds health and readiness checks, request correlation, log redaction and staging tooling.
+
+Results for the candidate, including the requirements-to-evidence matrix, acceptance evidence, known issues and readiness decisions, are in [RELEASE.md](RELEASE.md). In summary:
+
+- 96/96 tests, 2/2 built-Worker smoke tests, and 36/36 certification checks against the built Worker (a local rehearsal).
+- 173 automated browser checks.
+- Lint clean (0 errors) and the build passes.
+- Empty-database, earliest-version and interrupted-transaction migration tests pass, and local backup/restore is verified.
+
+Hosted staging is **not certified**: no authorized isolated target exists ([STAGING.md](STAGING.md)).

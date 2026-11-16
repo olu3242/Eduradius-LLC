@@ -66,6 +66,8 @@ Every environment, including production, must apply migrations in order: `0001_a
 
 The workspace never sends messages, submits proposals or uploads files; evidence is reference-only until private storage is configured. Remaining work is listed in [docs/BACKLOG.md](docs/BACKLOG.md).
 
+**Release status:** see [docs/RELEASE.md](docs/RELEASE.md) for the release candidate, requirements-to-evidence matrix, validation results, known issues and readiness decisions, and [docs/STAGING.md](docs/STAGING.md) for isolated staging deployment and certification (`scripts/staging-certify.mjs`). Health: `GET /api/health`, `GET /api/health/ready`.
+
 ## Brand downloads
 - `public/brand/radius-v2/EduRadius_Premium_Brand_System.zip`: complete brand package, including website assets
 - `public/brand/radius-v2/EduRadius_Premium_Brandbook.pdf`: 21-page identity guidelines
