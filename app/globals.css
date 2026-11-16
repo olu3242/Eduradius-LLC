@@ -10,3 +10,5 @@
 .sidebar{overflow-y:auto}.side-bottom{padding-top:24px}.workspace-chip{margin-top:25px;margin-bottom:20px}@media(max-height:850px){.sidebar .private-card{display:none}.sidebar .side-bottom{padding-top:15px}}
 .workspace-brand-image{width:181px;max-width:100%;height:auto;display:block}.brand-download-panel{display:flex;gap:28px;align-items:center;background:#f7f9f0;border:1px solid #e2e8d7;padding:24px;margin-bottom:25px}.brand-download-panel>img{width:240px;max-width:42%;height:auto}.brand-download-panel h3{font-size:13px}.brand-download-panel p{font-size:10px;color:#829270;margin:6px 0 12px}.brand-download-panel .button{font-size:10px;padding:9px 12px}@media(max-width:680px){.brand-download-panel{flex-direction:column;align-items:start;padding:20px;gap:14px}.brand-download-panel>img{width:230px;max-width:100%}}
 .statement-brand-logo{display:block;width:270px;max-width:85%;height:auto;margin-bottom:20px}.brand-download-panel .heading-actions{flex-wrap:wrap;max-width:550px}
+
+.auth-modal{width:440px;max-width:100%}.auth-modal .field{display:flex;flex-direction:column}.auth-modal a.button{text-decoration:none;display:inline-flex;align-items:center}

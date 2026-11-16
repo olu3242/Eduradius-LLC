@@ -19,7 +19,14 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-The clean-clone default is the portable runtime. The URL is printed by the dev server. The workspace API requires the local D1 schema: apply `drizzle/0000_wonderful_exiles.sql` to the local `DB` binding with Wrangler before saving records. See [runtime notes](docs/SITES_RUNTIME.md) for preview, bindings and build details.
+The clean-clone default is the portable runtime. The URL is printed by the dev server. The workspace API requires the local D1 schema: build once, then apply each migration in `drizzle/` in order to the local `DB` binding (see [runtime notes](docs/SITES_RUNTIME.md) for preview, bindings and build details):
+
+```sh
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0000_wonderful_exiles.sql
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0001_access_protection.sql
+```
+
+In `pnpm dev`, open `/workspace` and choose **Sign in** (the loopback-only mock sign-in). For `pnpm start` (built Worker), configure access in `dist/server/.dev.vars` after each build (see below).
 
 ```sh
 pnpm exec tsc --noEmit
@@ -29,7 +36,27 @@ pnpm build
 ## Hosting and access
 The existing Site is hosted privately at https://eduradius-contract-workspace.olufemi-adey-1577.chatgpt.site. This GitHub import does not configure automatic deployment. The .openai/hosting.json file retains the existing Site identity.
 
-The workspace API relies on the host's owner-private access policy and a D1 binding named DB. An independently deployed copy must provide equivalent authentication/authorization before exposing the API. No hosted records, credentials, local database state or registration submissions are included in this repository.
+No hosted records, credentials, local database state or registration submissions are included in this repository.
+
+## Workspace access protection
+The API enforces access server-side; it no longer depends only on the host policy.
+
+| Route | Access | Purpose |
+|---|---|---|
+| `GET/PUT /api/workspace` | Owner only | Full workspace read/save (optimistic revisions) |
+| `GET /api/site` | Public | Only the fields the company site renders; no inquiries, opportunities, documents, receipts or notes |
+| `POST /api/inquiries` | Public, append-only | Validated intake, 5 per 10 min per client, honeypot, 500-inquiry cap |
+| `GET/POST/DELETE /api/auth/session` | Public | Session status; token sign-in (10 attempts per 10 min); sign-out |
+
+Configure with Worker variables/secrets:
+
+| Variable | Notes |
+|---|---|
+| `WORKSPACE_AUTH_MODE` | `sites` or `token`. **Unset: built Workers deny all owner access (503).** The Vite dev server defaults to `sites` with mock sign-in. |
+| `WORKSPACE_OWNER_IDS` / `WORKSPACE_OWNER_EMAILS` | `sites` mode, comma-separated; required outside dev. Trusts `oai-authenticated-user-*` headers, so use `sites` **only** behind the Sites dispatch, which strips client-supplied copies. |
+| `WORKSPACE_ACCESS_TOKEN` | `token` mode secret, at least 32 characters (`openssl rand -base64 32`). Exchanged for a 12-hour HMAC-signed `HttpOnly; SameSite=Strict` cookie (`Secure` on HTTPS); `Authorization: Bearer` also accepted. Rotating it revokes all sessions. Store it as a secret, never a plain var. |
+
+Every environment, including production, must apply `drizzle/0001_access_protection.sql` (`rate_limits`); public intake and token sign-in fail closed without it.
 
 ## Brand downloads
 - `public/brand/radius-v2/EduRadius_Premium_Brand_System.zip`: complete brand package, including website assets
