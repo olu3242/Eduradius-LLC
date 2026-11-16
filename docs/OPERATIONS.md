@@ -108,6 +108,38 @@ To fully return to the old model, restore the document from `workspace_snapshots
 
 **Duplicate-conversion suspicion.** `SELECT source_inquiry_id, COUNT(*) FROM opportunities GROUP BY 1 HAVING COUNT(*) > 1` must return no rows; the unique index enforces this.
 
+## Health, logging and alerts
+
+**Endpoints (public, no secrets):**
+
+- `GET /api/health` is liveness and returns `{ status: "ok", build }`.
+- `GET /api/health/ready` is readiness. It returns 200 only when the database is reachable, every table the code reads exists, and an access mode is configured. Each check reports only `ok`, `incomplete`, `unavailable` or `not_configured`, plus the build commit, with no table names, modes, values or counts. `build` comes from `BUILD_COMMIT` at build time, or the local git commit.
+
+**Logs:**
+
+- Every response carries `x-request-id`. A well-formed incoming ID is kept; otherwise a UUID is generated.
+- Every log line is one JSON object with `event`, `at` and `requestId`.
+- Keys that look like personal data, credentials or document content (email, token, password, secret, authorization, cookie, phone, name, scope, notes, body, content, summary) are redacted, and long strings are truncated to 300 characters. Tests cover the redaction.
+- Unhandled exceptions return a generic 500 with the request ID and log `http.exception` (method, path, message). Responses with status 500 or above log `http.error`.
+
+**Alert rules (prepared, not activated).** Thresholds are owner decisions; no targets are assumed.
+
+| Signal | Condition | Action |
+| --- | --- | --- |
+| `http.exception` / `http.error` | more than `<threshold>` in `<window>` | Inspect logs by `requestId`; roll back if the release introduced it |
+| Readiness | `/api/health/ready` not 200 for `<window>` | Check the D1 binding, migrations and `WORKSPACE_AUTH_MODE` |
+| `workspace.access.denied` with `reason` `not_owner` or `anonymous` | spike above `<baseline>` | Possible probing; review the access policy |
+| `ratelimit.error`, `workflow.error`, `workspace.error`, `inquiry.error` | any | Database or code fault; intake and sign-in fail closed |
+| `inquiry.capacity` | any | Intake reached its stored-request cap |
+
+Deliver alerts through the hosting provider's log alerting (for example Workers Logs or Logpush to an alerting system), configured by the owner. No alerts or scheduled monitors are active.
+
+## Identity and accountability
+
+- **`token` mode:** one shared access key. Every action is attributed to `token:session` (browser) or `token:bearer` (API). This cannot identify an individual person, so do **not** treat activity history as individual staff attribution. Rotate the key when someone's access must end.
+- **`sites` mode:** the actor is `sites:<stable Sites user id>` for allowlisted owners, which attributes actions to a signed-in account.
+- **Owner review:** approvals are owner reviews in a single-owner workspace, not independent second reviews.
+
 ## Staging acceptance checklist
 
 - [ ] Isolated staging Worker and its own D1 database provisioned (never the existing Site)

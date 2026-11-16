@@ -1,4 +1,5 @@
 // Shared HTTP helpers for API routes. Server-only.
+import { currentRequestId } from './request-context';
 
 const baseHeaders = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 
@@ -37,8 +38,25 @@ export function clientAddress(request: Request) {
   return request.headers.get('cf-connecting-ip') || 'unknown';
 }
 
+/** Keys whose values may contain personal data, credentials or document content. */
+const SENSITIVE_KEY = /(email|e-mail|token|password|secret|authorization|cookie|phone|name|scope|notes|body|content|summary)/i;
+const MAX_LOG_STRING = 300;
+/** Redacts sensitive keys and truncates long values before anything is logged. */
+export function redactLogFields(fields: Record<string, unknown>): Record<string, unknown> {
+  const clean = (value: unknown, depth: number): unknown => {
+    if (typeof value === 'string') return value.length > MAX_LOG_STRING ? value.slice(0, MAX_LOG_STRING) + '…' : value;
+    if (value === null || typeof value !== 'object') return value;
+    if (depth > 2) return '[nested]';
+    if (Array.isArray(value)) return value.slice(0, 20).map(v => clean(v, depth + 1));
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, SENSITIVE_KEY.test(k) ? '[redacted]' : clean(v, depth + 1)]));
+  };
+  return clean(fields, 0) as Record<string, unknown>;
+}
+
+/** Structured, redacted log line with the request correlation ID when available. */
 export function logEvent(event: string, fields: Record<string, unknown> = {}) {
-  console.log(JSON.stringify({ event, at: new Date().toISOString(), ...fields }));
+  const requestId = currentRequestId();
+  console.log(JSON.stringify({ event, at: new Date().toISOString(), ...(requestId ? { requestId } : {}), ...redactLogFields(fields) }));
 }
 
 export async function sha256Hex(value: string) {

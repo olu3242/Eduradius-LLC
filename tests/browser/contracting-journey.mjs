@@ -1,7 +1,7 @@
 // Stage 3–4 browser journey against a LOCAL dev server (loopback mock sign-in, isolated
 // local D1 with every migration applied). Not part of CI: needs a local Playwright + Chromium.
 //   BASE=http://127.0.0.1:5173 node tests/browser/contracting-journey.mjs
-// Opportunity → organization/contact → requirements → evidence → proposal → request changes →
+// Briefing → review → assign → follow-up → qualify → convert → organization/contact → requirements → evidence → proposal → request changes →
 // revise → approve → record submission → confirm award → project → milestones → deliverable →
 // request revision → accept revised version → approve scope change → closeout → private
 // experience record → reload and verify persistence; then mobile layout checks.
@@ -29,13 +29,48 @@ try {
   const panel = () => page.locator('.tab-panel');
   const save = async (d, name = 'Save') => { await d.getByRole('button', { name, exact: true }).click(); await settle(); };
 
+  let d;
+  // Public briefing (synthetic, clearly labelled test data).
+  await page.goto(BASE + '/', { waitUntil: 'networkidle' });
+  const form = page.locator('form.m-contact-form');
+  await form.scrollIntoViewIfNeeded();
+  await form.getByLabel('Name').fill(`Synthetic Tester ${T}`);
+  await form.getByLabel('Organization').fill(`Synthetic District ${T}`);
+  await form.getByLabel('Work email').fill(`synthetic-${T.toLowerCase()}@example.test`);
+  await form.getByLabel('What would you like to work on?').fill('SYNTHETIC TEST DATA — AI governance policy and staff training.');
+  await form.getByRole('button', { name: /Save briefing request/ }).click(); await settle(1500);
+  check('public briefing stored without claiming email', /No email has been sent/.test(await form.locator('.form-feedback').innerText()));
+
   await page.goto(BASE + '/signin-with-chatgpt?return_to=/workspace', { waitUntil: 'networkidle' });
   await settle();
+  const workflowResponse = await page.request.get(BASE + '/api/workflow');
+  check('responses carry a correlation id', /^[0-9a-f-]{36}$/.test(workflowResponse.headers()['x-request-id'] ?? ''));
+  const today = (await workflowResponse.json()).today;
+
+  // Review → assign → schedule follow-up → qualify → convert.
+  await nav('Client requests');
+  const card = page.locator('.inquiry-card', { hasText: `Synthetic District ${T}` });
+  await card.getByRole('button', { name: /Review request/ }).click();
+  d = dialog();
+  await d.getByLabel('Assigned owner').fill('Olu');
+  await d.getByLabel('Next action').fill('Confirm scope by phone');
+  await d.getByLabel('Next-action due date').fill(today);
+  await d.getByRole('button', { name: 'Save' }).click(); await settle();
+  await d.getByLabel('Status').selectOption('Qualified');
+  await d.getByLabel(/Reason for marking Qualified/).fill('Synthetic test: scope and budget confirmed.');
+  await d.getByRole('button', { name: 'Save' }).click(); await settle();
+  check('request reviewed, assigned, follow-up scheduled and qualified', (await d.innerText()).includes('Changes saved.') && (await d.locator('.activity-list').innerText()).includes('Assigned to Olu'));
+  await d.getByRole('button', { name: 'Convert to opportunity' }).click(); await settle(400);
+  d = dialog();
+  await d.getByLabel('Opportunity title').fill(`AI governance RFP ${T}`);
+  await d.getByRole('button', { name: 'Create opportunity' }).click(); await settle(1000);
+  check('converted to opportunity', (await d.innerText()).includes('Opportunity created'));
+  await d.getByRole('button', { name: 'Back to requests' }).click(); await settle(300);
 
   // Shared records: organization + contact, evidence.
   await nav('Organizations');
   await page.getByRole('button', { name: 'Add organization' }).click();
-  let d = dialog();
+  d = dialog();
   await d.getByLabel('Organization name').fill(`Client ${T} District`);
   await d.getByLabel('Organization type').selectOption('Government buyer');
   await save(d);
@@ -62,12 +97,8 @@ try {
   }
   check('evidence register shows reference-only limitation', (await page.locator('main').innerText()).includes('Reference-only register'));
 
-  // Opportunity → link organization/contact.
+  // Converted opportunity → link organization/contact.
   await nav('Opportunities');
-  await page.getByRole('button', { name: 'Add opportunity' }).first().click();
-  d = dialog();
-  await d.getByLabel('Opportunity title').fill(`AI governance RFP ${T}`);
-  await d.getByRole('button', { name: /Save opportunity/ }).click(); await settle(900);
   await page.locator('.opportunity-card', { hasText: `AI governance RFP ${T}` }).getByRole('button', { name: /Open pursuit/ }).click(); await settle(300);
   await page.getByLabel(/^Organization/).selectOption({ label: `Client ${T} District` });
   await page.getByLabel(/^Primary contact/).selectOption({ label: `Pat ${T} · Director of Technology` });
@@ -250,6 +281,9 @@ try {
   check('mobile (390px) pages and project tabs have no horizontal overflow', mobileOk);
   await mobile.close();
 
+  const live = await (await page.request.get(BASE + '/api/health')).json();
+  const readyResponse = await page.request.get(BASE + '/api/health/ready');
+  check('health endpoints report status without configuration details', live.status === 'ok' && readyResponse.status() === 200 && !JSON.stringify(await readyResponse.json()).match(/token|sites|inquiries/));
   check('no page or console errors', errors.length === 0, errors.slice(0, 3).join(' | '));
 } finally { await browser.close(); }
 console.log(`\n${results.filter(Boolean).length}/${results.length} contracting journey checks passed`);

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import vinext from "vinext";
 import { defineConfig } from "vite";
 import hostingConfig from "./.openai/hosting.json";
@@ -37,6 +38,12 @@ const localBindingConfig = {
     : [],
 };
 
+// Build identity for /api/health: BUILD_COMMIT (CI/deploy) or the local git commit.
+function buildCommit() {
+  if (process.env.BUILD_COMMIT && /^[0-9a-f]{7,40}$/.test(process.env.BUILD_COMMIT)) return process.env.BUILD_COMMIT.slice(0, 12);
+  try { return execFileSync("git", ["rev-parse", "--short=12", "HEAD"], { encoding: "utf8" }).trim(); } catch { return "unknown"; }
+}
+
 export default defineConfig(async ({ command }) => {
   configureToolEnvironment(process.cwd());
 
@@ -44,6 +51,7 @@ export default defineConfig(async ({ command }) => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
+    define: { __EDURADIUS_BUILD__: JSON.stringify(buildCommit()) },
     server: {
       ...(managedLinux
         ? { host: "0.0.0.0", allowedHosts: ["terminal.local"] }
