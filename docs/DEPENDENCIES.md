@@ -1,5 +1,34 @@
 # Dependency advisories
 
+## Current state (candidate `6ba656c`)
+
+`pnpm audit --prod` and `pnpm audit`: **no known vulnerabilities** (2026-11-16).
+
+The four development and build advisories listed further below were cleared by upgrading the framework and tooling in `3000478`:
+
+| Package | From | To | Notes |
+| --- | --- | --- | --- |
+| `vinext` | 1.0.0-beta.5 | 1.4.4 | No longer depends on the vulnerable `image-size`. `@vercel/og` 1.0.3 brings `satori` 0.33.5. Requires React 19.3.1 |
+| `react`, `react-dom`, `react-server-dom-webpack` | 19.2.9 | 19.3.1 | vinext peer requirement; includes the earlier RSC fixes |
+| `@vitejs/plugin-rsc` | 0.5.26 | 0.5.39 | vinext peer requirement |
+| `wrangler` + `@cloudflare/vite-plugin` | 4.92.0 + 1.37.1 | 4.157.0 + 1.68.0 | One wrangler copy; esbuild 0.28.2; Miniflare 5 (beta), so local runtime behaviour was re-verified |
+| `drizzle-kit` | 0.31.10 | 0.31.11 | — |
+| Override `@esbuild-kit/core-utils>esbuild` | 0.18.20 | 0.25.12 | Clears GHSA-67mh-4wv8-2f99. `pnpm db:generate` verified (it generated 0008) |
+| Override `minimatch@10` | 10.2.5 | 11.0.5 | Clears GHSA-g3hv-75wg-m249. This crosses the declared `^10` range of `@typescript-eslint/typescript-estree`; lint output is unchanged (0 errors, the same 13 warnings) |
+
+Compatibility on the upgraded stack:
+
+- tsc, lint, 115 tests, build and worker smoke tests passed at `3000478`;
+- browser runs: contracting journey 5/5 and Stage 1–2 journey 2/2 on clean databases;
+- `staging-config` and a dry-run deploy (1,398.61 KiB, 401.12 KiB gzipped);
+- the candidate's full results are in [RELEASE.md](RELEASE.md).
+
+Version selection kept the 7-day minimum release age.
+
+**New artifact property.** vinext 1.4.4 build output includes source maps and per-build random framework values (preview-mode credentials, the Server Actions key and the RSC build identity). See [STAGING_HANDOFF.md](STAGING_HANDOFF.md) §1 for how the archive is built once and stored privately.
+
+## Earlier remediation (`55bb85c`, historical)
+
 Audited on 2026-11-16 with `pnpm audit` (pnpm 11.25.0, GitHub advisory database), before and after the remediation commit. Version choices respect the repository's `minimumReleaseAge` policy (7 days), so the newest releases were not used.
 
 ## Summary

@@ -1,5 +1,7 @@
 # Isolated staging: preparation and certification
 
+**Operator checklist for the current candidate: [STAGING_HANDOFF.md](STAGING_HANDOFF.md)** (candidate SHA, archive checksum, routes, permissions, acceptance tests, evidence).
+
 **Status: prepared, not deployed.** No explicitly authorized, isolated staging target exists for this repository. This session has no Cloudflare account, API token or staging Site, and the only hosted deployment is the live Site, which must not be used as staging. Nothing in this document has been run against a hosted environment.
 
 ## Isolation requirements
@@ -15,8 +17,16 @@
 
 Guards in the tooling:
 
-- `scripts/staging-config.mjs` refuses unless the Worker and database names contain `staging` and the D1 ID is a real UUID (not the local placeholder). It never writes secrets.
-- `scripts/staging-certify.mjs` refuses the production host, refuses any host not typed exactly in `STAGING_CONFIRM_HOST`, requires HTTPS for non-local targets, and never prints the token.
+- `scripts/staging-config.mjs`:
+  - requires the account id, the Worker and database names (containing `staging`), the database UUID, and `STAGING_CONFIRM_TARGET=<account>/<worker>/<database name>/<database id>` exactly;
+  - refuses identifiers listed in `scripts/production-identity.json` and the local placeholder database;
+  - fails without a build, and never writes secrets.
+- `scripts/staging-certify.mjs`:
+  - refuses the production host and any host not typed exactly in `STAGING_CONFIRM_HOST`;
+  - requires HTTPS for non-local targets and `--expect-build <sha>`;
+  - checks liveness, the deployed build and readiness **before** creating any record, and exits 2 without writing if any fails;
+  - never prints the token.
+- Both are tested against local fixtures and a mock server (`tests/staging-tools.test.mjs`).
 
 ## What the owner must provide (blocking)
 
@@ -29,11 +39,12 @@ Guards in the tooling:
 Confirm the target account and names before every command.
 
 ```sh
-export BUILD_COMMIT=<candidate commit SHA>
-git checkout "$BUILD_COMMIT" && pnpm install --frozen-lockfile && pnpm build
+# Use the recorded candidate archive (STAGING_HANDOFF.md §1, §9); do not rebuild.
+git checkout <candidate commit SHA> && rm -rf dist && mkdir dist && tar -xzf <archive> -C dist
 npx wrangler d1 create eduradius-staging        # once; note the database_id
-STAGING_WORKER_NAME=eduradius-staging STAGING_D1_DATABASE_NAME=eduradius-staging \
-  STAGING_D1_DATABASE_ID=<database_id> node scripts/staging-config.mjs
+STAGING_CLOUDFLARE_ACCOUNT_ID=<account id> STAGING_WORKER_NAME=eduradius-staging STAGING_D1_DATABASE_NAME=eduradius-staging \
+  STAGING_D1_DATABASE_ID=<database_id> STAGING_CONFIRM_TARGET=<account id>/eduradius-staging/eduradius-staging/<database_id> \
+  node scripts/staging-config.mjs
 npx wrangler deploy --dry-run --config dist/server/wrangler.staging.json   # review bindings
 ```
 
@@ -43,7 +54,7 @@ Back up the database before migrating (staging starts empty, but rehearse the pr
 npx wrangler d1 export eduradius-staging --remote --output staging-before-$BUILD_COMMIT.sql
 ```
 
-Inspect the database, apply exactly the files the status check lists (all of 0000–0007 for a new, empty database), confirm, then set the secret and deploy:
+Inspect the database, apply exactly the files the status check lists (all of 0000–0008 for a new, empty database), confirm, then set the secret and deploy:
 
 ```sh
 npx wrangler d1 execute eduradius-staging --remote --json --config dist/server/wrangler.staging.json --command "$(node scripts/migration-status.mjs --print-query)" > schema.json

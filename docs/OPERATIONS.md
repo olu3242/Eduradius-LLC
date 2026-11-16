@@ -46,6 +46,7 @@ pnpm preflight --target local --env-file dist/server/.dev.vars
 | 0005 | `0005_projects_and_delivery.sql` | `projects`, `project_baselines`, `milestones`, `deliverables`, `project_log` | — |
 | 0006 | `0006_delivery_closeout.sql` | `deliverable_versions`, `change_requests`, `project_closeouts`, `experience_records` | — |
 | 0007 | `0007_list_indexes.sql` | 18 indexes for paginated lists, parent filters and follow-ups | — |
+| 0008 | `0008_import_conflicts.sql` | `import_conflicts` + 2 indexes (rollback-window edits awaiting an owner decision) | — |
 
 Every file only creates tables, indexes or nullable columns. Each statement creates exactly one object. No migration rewrites rows.
 
@@ -53,9 +54,10 @@ Every file only creates tables, indexes or nullable columns. Each statement crea
 
 | Code | Schema/data state | Works? | Evidence |
 | --- | --- | --- | --- |
-| This release (`af555c9`) | All of 0000–0007 | Yes | All suites |
-| This release | 0000–0006 (0007 not yet applied) | Yes, without the new indexes (slower lists) | `recovery.test` |
-| Previous candidate `e07844b` (Stage 3–4) | Data written by this release, 0007 applied | Yes: reads every record identically and its full contracting journey passes (27/27) | [VERIFICATION.md](VERIFICATION.md) |
+| This release (`6ba656c`) | All of 0000–0008 | Yes | All suites |
+| This release | 0000–0008 without 0007 | Yes, without the list indexes (slower lists) | `recovery.test` |
+| This release | Without 0008 | **No.** Readiness reports the schema `incomplete`, and the summary fails. Apply 0008 before deploying | `health.ts` lists `import_conflicts` |
+| Previous candidate `e07844b` (Stage 3–4) | Data written by `af555c9` with 0007 applied | Yes: reads every record identically and its full contracting journey passes (27/27). **Not re-run** against 0008 data; 0008 only adds a table that older code ignores | [VERIFICATION.md](VERIFICATION.md) |
 | Pre-workflow Site v5 | **Before** the first owner load of 0002+ code | Yes (nothing has moved yet) | — |
 | Pre-workflow Site v5 | **After** the legacy import | **No.** Requests, opportunities and activity are no longer in the document, and its save rejects the document (`400 Invalid workspace.`), because v5 requires an `opportunities` array | Verified locally with the original v5 handler; see Rollback |
 
@@ -84,7 +86,15 @@ wrangler d1 execute <database> --remote --json --command "$(node scripts/migrati
 node scripts/migration-status.mjs --wrangler-json schema.json
 ```
 
-The tool lists each file as `applied`, `pending` or `partial`. It prints the files to apply, in order, only when the applied files form a clean prefix. It exits with code 2 if any file is partial or out of order, and it refuses to prescribe anything from an empty or failed schema read.
+The tool lists each file as `applied`, `pending` or `partial`. It prints the files to apply, in order, only when the applied files form a clean prefix and the target's state is unambiguous.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Consistent; the listed files (or none) are pending |
+| 1 | Inspection failed, unreadable or malformed; or an empty result without `--empty-database-ok` (use that flag only for a database you just created) |
+| 2 | Partial or out-of-order file; objects that no migration creates (wrong database?) unless `--allow-unrecognised`; or Wrangler migration tracking (`d1_migrations`) that disagrees with the schema. Pass `--d1-migrations-json` from `SELECT name FROM d1_migrations ORDER BY id` when that table exists |
+
+CLI tests cover empty, previous-release (0006), fully migrated, partial, failed and ambiguous targets (`tests/migration-preflight.test.mjs`).
 
 Then:
 
@@ -141,9 +151,9 @@ Choose by what was deployed and what happened since. Schema migrations are addit
 
 | Situation | Safe action | Not safe |
 | --- | --- | --- |
-| This release misbehaves; the previous release was `e07844b` or later | Redeploy the previous artifact and leave migrations applied. Verified: `e07844b` reads this release's data identically and passes its journey. | Dropping 0007 indexes (no need) |
+| This release misbehaves; the previous release was `e07844b` or later | **Preferred.** Redeploy the previous artifact and leave migrations applied. Verified: `e07844b` read `af555c9` data identically and passed its journey; open rollback conflicts (0008) simply wait until this release returns | Dropping 0007 or 0008 objects (no need) |
 | A migration failed part-way | Inspect, then resume the missing statements, or restore the pre-migration backup | Re-running the whole file; dropping tables that hold data |
-| Must return to **pre-workflow Site v5 after the legacy import** | Rebuild the legacy document (below), then redeploy v5 | Redeploying v5 alone. It hides every request and opportunity, and its save fails with 400 (verified with the original v5 handler) |
+| Must return to **pre-workflow Site v5 after the legacy import** (only when the previous release cannot be used) | Rebuild the legacy document (below), then redeploy v5; treat existing records as read-only while v5 is live | Redeploying v5 alone. It hides every request and opportunity, and its save fails with 400 (verified with the original v5 handler) |
 | Data damaged by the release | Restore the pre-release backup into a new database, then reconcile records created since from an owner export taken before the restore | Restoring over the live database without an export of newer records |
 
 ### Returning to Site v5 after the import (tested locally)
@@ -151,7 +161,7 @@ Choose by what was deployed and what happened since. Schema migrations are addit
 1. Take a database backup and an owner export: `GET /api/export` saved as `export.json`.
 2. Run:
    ```sh
-   node scripts/recovery/legacy-document.mjs --from-export export.json --out rollback/
+   node scripts/recovery/legacy-document.mjs --from-export export.json --out rollback/ --confirm-v5-rollback
    ```
    This rebuilds the legacy document from the **current** tables:
    - every request and opportunity keeps its id; requests created after the import are included;
@@ -159,18 +169,41 @@ Choose by what was deployed and what happened since. Schema migrations are addit
    - assignee and next action are appended to the request notes;
    - the original legacy activity entries are restored.
 
-   It writes `legacy-workspace.json` and `apply-legacy-workspace.sql`, and applies nothing. It **refuses** (exit 2) if the document would exceed v5's 700,000-character save limit. The synthetic dataset of 1,200 requests produced 1.94 M characters and was refused. In that case do not roll back to v5: fix forward or restore a backup.
+   It writes `legacy-workspace.json` (with a `_rollback` marker fingerprinting every item handed to v5) and `apply-legacy-workspace.sql`, and applies nothing.
+
+   | Exit | Refused because |
+   | --- | --- |
+   | 2 | The export is incomplete (manifest counts differ from its collections) |
+   | 2 | The document, including the marker, would exceed v5's 700,000-character save limit (the synthetic dataset of 1,200 requests produced about 1.94 M characters) |
+   | 3 | `--confirm-v5-rollback` was not given. It first lists the records v5 cannot show |
+
+   If the document is too large, do not roll back to v5: redeploy the previous release, fix forward, or restore a backup.
 3. Apply `apply-legacy-workspace.sql`. It updates only if the document is still at the exported revision. Then redeploy v5.
-4. **While v5 is live:**
-   - workflow activity, organizations, contacts, requirements, evidence, proposals, projects and experience records stay in their tables, untouched and not shown by v5;
-   - new public requests go into the document.
-5. **Going forward again**, the first owner load imports the document. Only records added under v5 are inserted:
-   - existing ids and legacy activity are skipped;
-   - edits made under v5 to records that already exist in tables are **not** applied; they remain in the new `pre-workflow-r<revision>` snapshot for manual reconciliation.
+4. **While v5 is live (maintenance procedure):**
+   - Treat existing requests and opportunities as read-only where possible. Record new information as new notes after the forward move instead.
+   - Workflow activity, organizations, contacts, requirements, evidence, proposals, projects and experience records stay in their tables, untouched and not shown by v5.
+   - New public requests go into the document.
+5. **Going forward again**, the first owner load imports the document:
+   - records added under v5 are inserted;
+   - existing ids and legacy activity are not imported over the tables;
+   - any existing request or opportunity **changed** under v5 is compared with what was handed over (the marker's fingerprint, or the previous import snapshot when there is no marker). It is recorded as an open **rollback conflict** instead of being dropped;
+   - the v5 document is kept in a new `pre-workflow-r<revision>` snapshot.
+6. **Owner decisions.** Follow-ups → *Rollback conflicts — decision required* shows each conflict's fields: the current value (kept) beside the legacy edit. The navigation count includes open conflicts.
+   - **Keep current** or **Apply legacy edit**. A reason is required.
+   - Each decision is made once, version-guarded, and recorded in activity (`import.conflict_kept`, `import.conflict_applied`).
+   - Applying is refused (409) if the record was edited after the conflict was found. Review it and decide again.
+   - A converted request's status cannot be changed.
 
 Verified locally:
 
-- unit test (`recovery.test`), covering requests converted after the import, a project, a requirement on a legacy opportunity and an organization link;
+- unit tests (`recovery.test`, 9):
+  - the round trip, with requests converted after the import, a project, a requirement on a legacy opportunity and an organization link;
+  - rollback-window edits becoming conflicts;
+  - reason-required, version-guarded and decided-once decisions, with retries and re-imports;
+  - refusal when the record changed after detection;
+  - snapshot-baseline detection without a marker;
+  - the tool's refusals;
+- browser (`recovery-ui.mjs`): conflicts listed with field differences; buttons disabled until a reason is given; keep and apply decisions recorded with activity; no overflow at 390 px;
 - a manual run on the dev stack after both browser journeys: export → legacy document → SQL applied → the original v5 GET read 3 requests, 3 opportunities and 1 legacy activity entry, and its PUT (owner save) returned 200 → forward again.
 
 Results of the manual run, forward again:
@@ -220,8 +253,8 @@ No alerts or scheduled monitors are active.
 
 - [ ] Isolated staging Worker and its own D1 database provisioned (never the existing Site)
 - [ ] `pnpm preflight --target staging` passes with the staging configuration
-- [ ] `migration-status` on the empty staging database, then 0000–0007 applied in order; status reports `Up to date`
-- [ ] Rehearse an upgrade: a second staging database at 0006 with synthetic data; status prescribes only 0007; apply it; status reports `Up to date`
+- [ ] `migration-status` on the empty staging database, then 0000–0008 applied in order; status reports `Up to date`
+- [ ] Rehearse an upgrade: a second staging database at 0006 with synthetic data; status prescribes only 0007 and 0008; apply them; status reports `Up to date`
 - [ ] Seed a legacy-shaped document (`scripts/local/seed-legacy-document.mjs` shows the shape); the first owner load imports it and creates a snapshot
 - [ ] Anonymous visitor: `/api/workspace`, `/api/workflow`, `/api/records/*`, `/api/export` return 401 (or 503 if unconfigured); an authenticated **non-owner** gets 403 (sites mode)
 - [ ] `scripts/staging-certify.mjs` passes on the exact candidate (48 checks, including pagination, cursor validation, reports and export completeness)

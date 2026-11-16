@@ -12,7 +12,7 @@ Since schema 3, the workspace never downloads every record at once. Clients comp
 
 | Endpoint | Returns | Bound |
 | --- | --- | --- |
-| `GET /api/workflow` | Summary (`schema: 3`): `today`, `businessTimeZone`, unread `notifications` (≤ 50) and `unreadNotifications`, recent `activity` (≤ 20), `owners` (≤ 100), `opportunityStatusCounts`, `recentOpportunities` (5; card fields only), `counts` per type, `followUpsDue`. It also runs the idempotent legacy import. | No record collections and no notes or contact details |
+| `GET /api/workflow` | Summary (`schema: 3`): `today`, `businessTimeZone`, unread `notifications` (≤ 50) and `unreadNotifications`, recent `activity` (≤ 20), `owners` (≤ 100), `opportunityStatusCounts`, `recentOpportunities` (5; card fields only), `counts` per type, `followUpsDue`, `openImportConflicts`. It also runs the idempotent legacy import. | No record collections and no notes or contact details |
 | `GET /api/records/:type` | One page of records (see below) | `limit` ≤ 100 |
 | `GET /api/records/:type/:id` | One record (`inquiry`, `opportunity` or any record type) | 1 |
 | `GET /api/context/:type/:id` | A detail view's record and related records: `opportunity`, `project`, `organization`, `inquiry` | ≤ 500 per child type; `totals` reports larger sets |
@@ -20,6 +20,7 @@ Since schema 3, the workspace never downloads every record at once. Clients comp
 | `GET /api/followups?kind=all\|inquiry\|opportunity&owner=<name>\|none` | Follow-up buckets with complete `total`s | ≤ 100 items per bucket |
 | `GET /api/reports` | Operational metrics over **all** records, computed on the server | complete `count`; ≤ 100 `items` (`truncated` flag) |
 | `GET /api/organizations/duplicates` | Active organizations sharing a normalized name or website domain | ≤ 50 groups |
+| `GET /api/import-conflicts[?status=all]` | Rollback-window conflicts awaiting a decision (or all, including decided) | ≤ 100 items, with `total` |
 | `GET /api/export` | The complete workspace (schemaVersion 2 plus `manifest`) | All rows, or 413; never partial |
 
 ## Lists: `GET /api/records/:type`
@@ -125,3 +126,13 @@ Returns `exportBundle()` (schemaVersion 2): the workspace document, inquiries, o
 | 404 | — | Unknown type or record |
 | 413 | `export_too_large` | Export refused instead of truncated |
 | 503 | — | Database unavailable (logged as `workflow.error` with the request ID) |
+
+## Rollback conflicts
+
+`POST /api/actions/importConflict.resolve` takes `{ id, version, decision: "keep-current" | "apply-legacy", reason }`.
+
+- `reason` is required.
+- A stale `version`, an already decided conflict, or a record edited after the conflict was detected returns **409**.
+- Applying a status change to a converted request returns **409**.
+
+See [OPERATIONS.md](OPERATIONS.md) → Rollback.
