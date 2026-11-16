@@ -34,7 +34,7 @@ try {
   run('pnpm', ['build'], { cwd: src, env });
   const dist = join(src, 'dist');
   const files = [];
-  const walk = d => { for (const name of readdirSync(d)) { const p = join(d, name); statSync(p).isDirectory() ? walk(p) : files.push(p); } };
+  const walk = d => { for (const name of readdirSync(d)) { const p = join(d, name); if (statSync(p).isDirectory()) walk(p); else files.push(p); } };
   walk(dist);
   // Checks: build identity and absence of local configuration / credentials.
   const identity = files.some(f => f.includes('/dist/server/') && f.endsWith('.js') && readFileSync(f, 'utf8').includes(short));
