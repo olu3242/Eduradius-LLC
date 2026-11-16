@@ -24,6 +24,7 @@ The clean-clone default is the portable runtime. The URL is printed by the dev s
 ```sh
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0000_wonderful_exiles.sql
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0001_access_protection.sql
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0002_connected_workflow.sql
 ```
 
 In `pnpm dev`, open `/workspace` and choose **Sign in** (the loopback-only mock sign-in). For `pnpm start` (built Worker), configure access in `dist/server/.dev.vars` after each build (see below).
@@ -45,7 +46,8 @@ The API enforces access server-side; it no longer depends only on the host polic
 |---|---|---|
 | `GET/PUT /api/workspace` | Owner only | Full workspace read/save (optimistic revisions) |
 | `GET /api/site` | Public | Only the fields the company site renders; no inquiries, opportunities, documents, receipts or notes |
-| `POST /api/inquiries` | Public, append-only | Validated intake, 5 per 10 min per client, honeypot, 500-inquiry cap |
+| `POST /api/inquiries` | Public, append-only | Validated intake into the `inquiries` table; internal fields rejected; 5 per 10 min per client; honeypot |
+| `GET /api/workflow`, `PATCH /api/inquiries/:id`, `POST /api/inquiries/:id/convert`, `POST/PATCH /api/opportunities[/:id]`, `POST /api/notifications` | Owner only | Connected intake → opportunity workflow ([docs/WORKFLOW.md](docs/WORKFLOW.md)) |
 | `GET/POST/DELETE /api/auth/session` | Public | Session status; token sign-in (10 attempts per 10 min); sign-out |
 
 Configure with Worker variables/secrets:
@@ -56,7 +58,10 @@ Configure with Worker variables/secrets:
 | `WORKSPACE_OWNER_IDS` / `WORKSPACE_OWNER_EMAILS` | `sites` mode, comma-separated; required outside dev. Trusts `oai-authenticated-user-*` headers, so use `sites` **only** behind the Sites dispatch, which strips client-supplied copies. |
 | `WORKSPACE_ACCESS_TOKEN` | `token` mode secret, at least 32 characters (`openssl rand -base64 32`). Exchanged for a 12-hour HMAC-signed `HttpOnly; SameSite=Strict` cookie (`Secure` on HTTPS); `Authorization: Bearer` also accepted. Rotating it revokes all sessions. Store it as a secret, never a plain var. |
 
-Every environment, including production, must apply `drizzle/0001_access_protection.sql` (`rate_limits`); public intake and token sign-in fail closed without it.
+Every environment, including production, must apply migrations in order: `0001_access_protection.sql` (`rate_limits`; intake and token sign-in fail closed without it), then `0002_connected_workflow.sql` (workflow tables; additive). Existing inquiries, opportunities and activity move out of the workspace document automatically on the first owner load, with a snapshot of the original. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for environments, backup/restore, recovery and release checklists, and run `pnpm preflight --target <local|staging|production>` to check configuration without printing values.
+
+## Connected workflow
+**Client requests** lets the owner review, assign, schedule follow-ups, qualify or close requests, with a recorded reason and history. A qualified request converts into exactly one linked opportunity through an editable review step. **Follow-ups** lists overdue, due-today, unassigned, ready-to-convert and stalled-opportunity items in Central Time (America/Chicago), alongside new-request notifications and recent activity. Notifications are in-app only; no email is sent. Details: [docs/WORKFLOW.md](docs/WORKFLOW.md). The next stages are planned in [docs/BACKLOG.md](docs/BACKLOG.md) and are not implemented.
 
 ## Brand downloads
 - `public/brand/radius-v2/EduRadius_Premium_Brand_System.zip`: complete brand package, including website assets
@@ -81,6 +86,9 @@ pnpm lint
 pnpm test
 pnpm build
 pnpm test:worker
+pnpm preflight --target local
+# optional, local only (needs a locally installed Playwright; not run in CI):
+BASE=http://127.0.0.1:5173 node tests/browser/journey.mjs
 ```
 
 `pnpm test` runs the production route handlers and access helpers with an isolated

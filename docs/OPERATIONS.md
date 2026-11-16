@@ -1,0 +1,131 @@
+# Operations runbook
+
+## Environments
+
+| | Local | Isolated staging | Production |
+| --- | --- | --- | --- |
+| Purpose | Development and automated checks | Release acceptance on hosted infrastructure | Live EduRadius site |
+| Database | `.wrangler/state` (Miniflare D1) | Its own D1 database, never shared | Production D1 |
+| Auth | Dev server: loopback mock sign-in. `pnpm start`: configure `dist/server/.dev.vars` | Same mode as production | `sites` (Sites dispatch) or `token` (any other Worker host) |
+| Data | Clearly named test records only | Synthetic records only | Real records |
+| Status | Verified (see VERIFICATION.md) | **Not yet provisioned** | Existing Site; this release not deployed |
+
+The existing Site is **not** a staging target. Do not test this release against it.
+
+## Configuration (placeholders only)
+
+| Name | Where | Value |
+| --- | --- | --- |
+| `WORKSPACE_AUTH_MODE` | Variable | `sites` or `token` |
+| `WORKSPACE_OWNER_IDS` | Variable (sites) | `<comma-separated Sites user ids>` |
+| `WORKSPACE_OWNER_EMAILS` | Variable (sites) | `<comma-separated owner emails>` |
+| `WORKSPACE_ACCESS_TOKEN` | **Secret** (token) | `<output of: openssl rand -base64 32>` |
+| `DB` | D1 binding (`.openai/hosting.json`) | — |
+
+Never commit values. `.env*`, `.dev.vars*` and `*.pem` are git-ignored, and the preflight fails if any are tracked. Values never reach the browser bundle: they are read only in `lib/server/*`. Exports contain records but no configuration.
+
+```sh
+pnpm preflight --target staging
+pnpm preflight --target production
+pnpm preflight --target local --env-file dist/server/.dev.vars
+```
+
+The preflight reports names and checks (presence, length, placeholder patterns, allowlist presence, migration order, tracked secret files). It never prints values.
+
+## Local setup
+
+```sh
+corepack enable
+pnpm install --frozen-lockfile
+pnpm build
+for f in drizzle/0000_wonderful_exiles.sql drizzle/0001_access_protection.sql drizzle/0002_connected_workflow.sql; do
+  node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local \
+    --config dist/server/wrangler.json --persist-to .wrangler/state --file "$f"
+done
+pnpm dev
+```
+
+`pnpm dev` serves on `127.0.0.1`. Open `/workspace` and choose **Sign in** (loopback development identity).
+
+## Migration order and compatibility
+
+| # | File | Change | Compatible with previous code? |
+| --- | --- | --- | --- |
+| 0000 | `0000_wonderful_exiles.sql` | `workspaces` | — |
+| 0001 | `0001_access_protection.sql` | `rate_limits` | Yes (additive) |
+| 0002 | `0002_connected_workflow.sql` | `inquiries`, `opportunities`, `activity_events`, `notifications`, `workspace_snapshots` + indexes | Yes (additive; old code ignores the tables) |
+
+- Never edit an applied migration; add a new numbered file (`pnpm db:generate`).
+- Apply migrations **before** deploying the code that needs them. 0002 is additive, so code from before this release keeps working after it is applied.
+- The legacy data move is **not** a SQL migration. It runs in the application on the first owner load, after both 0002 and the new code are in place (see WORKFLOW.md). It is transactional, idempotent and keeps a snapshot.
+- After deploying, ask owners to reload open workspace tabs. Stale tabs receive a 409 on save, by design.
+
+## Backup and restore
+
+**Local** (verified in this iteration):
+
+```sh
+# stop pnpm dev / pnpm start first so SQLite files are consistent
+cp -r .wrangler/state ".wrangler-backup-$(date +%Y%m%d%H%M)"
+# restore: stop servers, then replace the directory
+rm -rf .wrangler/state && cp -r .wrangler-backup-<stamp> .wrangler/state
+```
+
+`wrangler d1 export --local` reads `dist/server/.wrangler/state`, not `.wrangler/state`, so use the file copy above for local data.
+
+**Cloudflare D1 (standalone Worker hosting)**, using commands available in the pinned Wrangler 4.92.0:
+
+```sh
+wrangler d1 export <database-name> --remote --output backup-<stamp>.sql   # logical backup before every migration
+wrangler d1 time-travel info <database-name>                             # record the current bookmark
+wrangler d1 time-travel restore <database-name> --bookmark=<bookmark>    # point-in-time restore
+```
+
+**Sites-managed D1:** the backup and restore procedure for the hosted Site's database is platform-managed and **has not been confirmed in this repository**. Confirm it with the hosting provider before the first production migration. If no supported export exists, do not migrate production.
+
+Application-level backup: **Export workspace** downloads the document and every workflow record (`schemaVersion: 2`). It is useful for audits and manual recovery, but it is not a database restore.
+
+## Recovery
+
+**Migration 0002 fails part-way.** D1 runs a file's statements without an outer transaction. Inspect with `SELECT name FROM sqlite_master`. Because 0002 only creates objects, drop any objects it created (`DROP TABLE` / `DROP INDEX` for the five tables and their indexes) and rerun it, or restore the pre-migration backup. Existing data is untouched.
+
+**The new release misbehaves after deploy.** Redeploy the previous build. Migration 0002 can stay, since old code ignores the new tables. Note that after the legacy import:
+
+- the previous code no longer sees inquiries, opportunities or activity, because they now live in tables;
+- the previous code writes new public requests into the workspace JSON, and the next release imports them automatically.
+
+To fully return to the old model, restore the document from `workspace_snapshots` (`pre-workflow-r<revision>`) **and** account for any records created afterwards.
+
+**The import conflicts repeatedly.** It retries on every owner load and is idempotent. Check the logs for `workspace.error` / `workflow.error`.
+
+**Duplicate-conversion suspicion.** `SELECT source_inquiry_id, COUNT(*) FROM opportunities GROUP BY 1 HAVING COUNT(*) > 1` must return no rows; the unique index enforces this.
+
+## Staging acceptance checklist
+
+- [ ] Isolated staging Worker and its own D1 database provisioned (never the existing Site)
+- [ ] `pnpm preflight --target staging` passes with the staging configuration
+- [ ] Migrations 0000→0002 applied in order; `sqlite_master` lists all tables
+- [ ] Seed a legacy-shaped document (see `tests/workflow.test.mjs`); first owner load imports it and creates a snapshot
+- [ ] Anonymous visitor: `/api/workspace` and `/api/workflow` return 401 (or 503 if unconfigured)
+- [ ] Authenticated **non-owner** returns 403 (sites mode)
+- [ ] Owner journey: submit → review → assign → schedule follow-up → qualify → convert → open opportunity → reload
+- [ ] Retrying the conversion returns `alreadyConverted`; only one opportunity exists
+- [ ] Follow-ups show “Due today” against America/Chicago dates
+- [ ] `/api/site` contains no request, opportunity or note content
+- [ ] Mobile (390 px) Client requests, Follow-ups and dialogs have no horizontal overflow
+- [ ] Export downloads `schemaVersion: 2` with all collections
+- [ ] Logs contain no contact details or secrets
+- [ ] Backup taken and a restore rehearsed on staging
+
+## Production release checklist
+
+- [ ] Staging acceptance checklist passed on this exact commit
+- [ ] CI green on the release commit
+- [ ] `pnpm preflight --target production` passes
+- [ ] Production backup taken and its restore procedure confirmed for the hosting platform
+- [ ] Apply migrations (0001 if not yet applied, then 0002); verify tables
+- [ ] Deploy the build; confirm `/api/workflow` returns 401 anonymously
+- [ ] Owner loads the workspace once (runs the import); verify counts against the snapshot
+- [ ] Spot-check one migrated request, opportunity and the Follow-ups view
+- [ ] Owners reload any open workspace tabs
+- [ ] Rollback plan from this document reviewed

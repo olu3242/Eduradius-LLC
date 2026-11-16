@@ -13,7 +13,8 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "test": "node --import ./tests/register.mjs --test tests/*.test.mjs",
-    "test:worker": "node --test tests/built-worker.smoke.mjs"
+    "test:worker": "node --test tests/built-worker.smoke.mjs",
+    "preflight": "node scripts/preflight.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

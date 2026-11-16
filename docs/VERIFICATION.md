@@ -55,3 +55,47 @@ a standalone public origin.
 The existing Site is not an isolated staging target. This iteration did not
 publish, merge the draft PR, modify its audience, set runtime variables, or apply
 any hosted migrations. Hosted certification remains pending.
+
+## Iteration 3: connected intake and opportunity workflow (local only)
+
+The checks below ran against this revision on Node 22.23.4 with pnpm 11.25.0, with an isolated local D1 database (`.wrangler/state`) seeded with a **legacy-shaped document**. That document had one inquiry with status `Tentative`, one opportunity and one activity entry, all written in the pre-workflow format. No hosted environment, live database or runtime setting was used or changed.
+
+| Check | Result |
+| --- | --- |
+| `pnpm exec tsc --noEmit` | Passed |
+| `pnpm lint` | Passed: 0 errors, 13 existing direct-image warnings (unchanged) |
+| `pnpm test` | 58/58: access (34), workflow (20), preflight (4) |
+| `pnpm build` | Passed; new routes `/api/workflow`, `/api/inquiries/:id`, `/api/inquiries/:id/convert`, `/api/opportunities[/:id]`, `/api/notifications` |
+| `pnpm test:worker` | 2/2 against the built Worker with every migration applied, including a concurrent double conversion (one 201, one 200 `alreadyConverted`, one opportunity) |
+| `tests/browser/journey.mjs` (dev server, Chromium) | 30/30 |
+| Additional browser regression suites (dev server and built Worker in token/unconfigured modes) | 38/38, 22/22, 30/30, 17/17 |
+| Local backup/restore (file copy of `.wrangler/state`) | Restored copy returned identical record counts |
+
+The browser journey covered:
+
+- **Public submission:** a request submitted through the public form, with no claim that email was sent.
+- **Legacy migration:** the seeded request appeared with status `Tentative` mapped to `Reviewing`.
+- **Keyboard dialog:** opened with Enter, Tab trapped, Escape closed it and returned focus.
+- **Labels:** every dialog control has a label.
+- **Review:** assign, schedule a follow-up due today in Central Time, then qualify. An empty reason was blocked by the form; a whitespace-only reason was rejected by the server with a visible alert.
+- **History:** recorded reviewed, assignment, follow-up and status events.
+- **Follow-ups:** the item appeared under Due today and under Ready to convert.
+- **Conversion:** the review was prefilled, the success state showed, and the resulting opportunity opened with the carried-over contact.
+- **Retry:** returned the existing opportunity; exactly one is linked.
+- **Persistence:** after a reload, the converted request and the migrated legacy opportunity both remained.
+- **Export:** `schemaVersion: 2` containing every collection.
+- **Public data:** `/api/site` has no workflow content.
+- **Downloads:** five brand downloads byte-identical to the published files.
+- **Mobile (390 px):** the menu reaches Follow-ups, there is no horizontal overflow, and the review dialog fits.
+- **Console:** no unexpected errors.
+
+**Not verified in this iteration:**
+
+- hosted Sites sign-in and owner allowlisting;
+- any staging or production deployment;
+- the hosted D1 backup and restore procedure;
+- screen-reader output (only structural checks: labels, dialog naming, focus, live regions);
+- browsers other than Chromium;
+- a formal WCAG conformance assessment.
+
+The browser journey is a local script, not part of CI.
