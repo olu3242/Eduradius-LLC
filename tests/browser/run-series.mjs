@@ -4,6 +4,8 @@
 //
 // clean    : before each attempt, stop the dev server, rebuild the local D1 (legacy document) and restart.
 // repeated : one database and server for all attempts (each attempt uses its own synthetic labels).
+//            At most 5 attempts fit in one 10-minute intake rate-limit window; later ones are classified
+//            'rate-limited-by-design'.
 // Each attempt keeps: suite stdout/stderr, exit code/signal, duration, the dev-server log written
 // during the attempt, and on failure the suite's diag.json and Playwright traces (DIAG_DIR).
 // summary.json is appended after every attempt and never rewritten from scratch, so retries
@@ -81,6 +83,9 @@ for (let n = 1; n <= runs; n++) {
     : serverExited() ? 'server-exit'
     : result.signal ? `suite-killed-${result.signal}`
     : result.code === 0 ? 'pass'
+    // The public intake allows 5 submissions per 10 minutes per address: in repeated mode later
+    // attempts from the same loopback address are refused by design (429), which is not an app fault.
+    : result.code !== 0 && diag?.recent?.some(r => r.status === 429 && r.url.startsWith('/api/inquiries')) ? 'rate-limited-by-design'
     : result.code === 3 ? (serverErrors.length || diag?.serverErrors?.length ? 'abort-with-server-errors' : 'abort')
     : result.code === 1 ? 'failed-checks'
     : /browserType\.launch|Target page, context or browser has been closed|Browser closed/i.test(result.stderr ?? '') ? 'browser-exit'
