@@ -1,6 +1,6 @@
 'use client';
 // Shared UI for server-paginated lists and bounded, searchable reference pickers.
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { Component, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { RefreshCw } from 'lucide-react';
 import type { Values } from '../../lib/records';
 import { usePagedList, useEnsureRecords, type PagedList, type Workflow } from './data';
@@ -68,4 +68,19 @@ export function RefPicker({ wf, type, value, onChange, label, filters, exclude =
     <small id={statusId} className="field-hint" aria-live="polite">{status}</small>
     {hint && <small id={hintId} className="field-hint" aria-hidden="true">{hint}</small>}
   </div>;
+}
+
+/**
+ * Contains a rendering failure to the current view: the navigation, other views and unsaved
+ * dialogs elsewhere keep working, and the owner can retry. Changing `resetKey` (the page) clears it.
+ */
+export class ViewBoundary extends Component<{ resetKey: string; children: ReactNode }, { error: Error | null; key: string }> {
+  state = { error: null as Error | null, key: this.props.resetKey };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  static getDerivedStateFromProps(props: { resetKey: string }, state: { error: Error | null; key: string }) { return props.resetKey !== state.key ? { error: null, key: props.resetKey } : null; }
+  componentDidCatch(error: Error) { console.error('Workspace view failed:', error.message); }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return <section className="panel large-empty" role="alert"><h2>This view could not be displayed.</h2><p>Your saved records are unaffected. Retry, or choose another section.</p><button className="button secondary" onClick={() => this.setState({ error: null })}><RefreshCw size={14} />Retry</button></section>;
+  }
 }

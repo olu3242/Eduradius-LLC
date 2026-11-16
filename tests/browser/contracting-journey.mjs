@@ -7,13 +7,15 @@
 // experience record → reload and verify persistence; then mobile layout checks.
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
+import { diagnostics } from './diagnostics.mjs';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
 const BASE = process.env.BASE || 'http://127.0.0.1:5173';
 const T = 'J' + Date.now().toString(36);
 const results = [];
-const check = (name, pass, detail = '') => { results.push(Boolean(pass)); console.log(`${pass ? 'PASS' : 'FAIL'} ${name}${detail ? ' — ' + detail : ''}`); };
+const diag = diagnostics('contracting-journey');
+const check = (name, pass, detail = '') => { results.push(Boolean(pass)); diag.checked(name, pass); console.log(`${pass ? 'PASS' : 'FAIL'} ${name}${detail ? ' — ' + detail : ''}`); };
 
 // Reference pickers show at most 20 matches; type into the picker's search box first, the way an
 // owner would once the workspace holds more records than fit in one list.
@@ -23,8 +25,10 @@ async function choose(scope, label, option, search = option) {
   await select.selectOption({ label: option });
 }
 const browser = await chromium.launch();
+let failure = null;
 try {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 950 }, acceptDownloads: true });
+  await diag.attach(ctx, 'desktop');
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
@@ -271,6 +275,7 @@ try {
 
   // Mobile layout.
   const mobile = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await diag.attach(mobile, 'mobile');
   const m = await mobile.newPage();
   await m.goto(BASE + '/signin-with-chatgpt?return_to=/workspace', { waitUntil: 'networkidle' }); await m.waitForTimeout(700);
   const overflow = () => m.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
@@ -292,6 +297,11 @@ try {
   const readyResponse = await page.request.get(BASE + '/api/health/ready');
   check('health endpoints report status without configuration details', live.status === 'ok' && readyResponse.status() === 200 && !JSON.stringify(await readyResponse.json()).match(/token|sites|inquiries/));
   check('no page or console errors', errors.length === 0, errors.slice(0, 3).join(' | '));
-} finally { await browser.close(); }
+} catch (error) { failure = error; console.log(`ABORT after "${diag.state.lastPassed ?? 'start'}": ${error.name}: ${String(error.message).split('\n')[0]}`); }
+finally {
+  if (failure || !results.every(Boolean)) await diag.fail(failure); else await diag.discard();
+  await browser.close();
+}
+if (failure) process.exit(3);
 console.log(`\n${results.filter(Boolean).length}/${results.length} contracting journey checks passed`);
 process.exit(results.every(Boolean) ? 0 : 1);

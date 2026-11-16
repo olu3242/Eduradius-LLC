@@ -28,7 +28,7 @@ type Conversion = { inquiry: InquiryRecord; opportunity: OpportunityRecord; alre
 const EMPTY: Store = { records: {}, inquiries: [], opportunities: [], evidenceLinks: [] };
 const idOf = (x: object) => (x as { id?: unknown }).id;
 function upsert<T extends object>(list: T[], items: T[]) {
-  if (!items.length) return list;
+  if (!Array.isArray(items) || !items.length) return list;
   const map = new Map(list.map(x => [idOf(x), x]));
   for (const item of items) map.set(idOf(item), item);
   return [...map.values()];
@@ -58,7 +58,13 @@ export function useWorkflow(onAuthRequired: (auth: AuthInfo, message: string) =>
       if ((e as Error)?.name === 'AbortError') return { ok: false, status: -1, error: 'aborted', body: {} };
       return { ok: false, status: 0, error: 'Network error. Check your connection and try again.', body: {} };
     }
-    const json = await response.json().catch(() => ({})) as { error?: string; auth?: AuthInfo };
+    // A body that cannot be read (aborted mid-body, or not JSON) is never reported as success:
+    // an aborted read used to surface as { ok: true, data: {} } and crash the cache merge.
+    let parsed: unknown = undefined, unreadable = false;
+    try { parsed = await response.json(); } catch (e) { if ((e as Error)?.name === 'AbortError' || signal?.aborted) return { ok: false, status: -1, error: 'aborted', body: {} }; unreadable = true; }
+    if (signal?.aborted) return { ok: false, status: -1, error: 'aborted', body: {} };
+    const json = (parsed && typeof parsed === 'object' ? parsed : {}) as { error?: string; auth?: AuthInfo };
+    if (response.ok && unreadable) return { ok: false, status: response.status, error: 'The server response could not be read. Please retry.', body: {} };
     if (json.auth && [401, 403].includes(response.status)) onAuthRequired(json.auth, response.status === 401 ? 'Your session has ended. Sign in again to continue; open dialogs keep your changes.' : json.error || 'This account cannot access the workspace.');
     return response.ok ? { ok: true, status: response.status, data: json as T } : { ok: false, status: response.status, error: json.error || 'Request failed. Please try again.', body: json as Values };
   }, [onAuthRequired]);
@@ -157,6 +163,7 @@ export function usePagedList(wf: Workflow, type: string, params: { q?: string; f
     if (keepWindow && loaded.current > limit) base.set('limit', String(Math.min(100, loaded.current)));
     const r = await call<Page>(`/api/records/${encodeURIComponent(type)}?${base.toString()}`, 'GET', undefined, controller.signal);
     if (mine !== seq.current || r.status === -1) return;
+    if (r.ok && !Array.isArray(r.data?.items)) { setError('The list response was incomplete. Please retry.'); setState('error'); return; }
     if (!r.ok) { setError(r.error); setState('error'); return; }
     merge(type, r.data.items);
     loaded.current = r.data.items.length;
@@ -169,14 +176,16 @@ export function usePagedList(wf: Workflow, type: string, params: { q?: string; f
     const sameQuery = lastKey.current === key; lastKey.current = key;
     void fetchFirst(sameQuery);
   }, [fetchFirst, key, revision, enabled]);
-  useEffect(() => () => abort.current?.abort(), []);
+  // On unmount: invalidate in-flight responses, then abort them.
+  useEffect(() => () => { seq.current++; abort.current?.abort(); }, []);
   const loadMore = useCallback(async () => {
     if (!meta.cursor || loadingMore) return;
     const mine = seq.current;
     setLoadingMore(true); setError('');
     const r = await call<Page>(`/api/records/${encodeURIComponent(type)}?${key}${key ? '&' : ''}cursor=${encodeURIComponent(meta.cursor)}`);
     setLoadingMore(false);
-    if (mine !== seq.current) return;
+    if (mine !== seq.current || r.status === -1) return;
+    if (r.ok && !Array.isArray(r.data?.items)) { setError('The list response was incomplete. Please retry.'); return; }
     if (!r.ok) {
       if (['stale_cursor', 'invalid_cursor'].includes(String(r.body.code))) { void fetchFirst(false); return; }
       setError(r.error); return;
@@ -224,7 +233,7 @@ export function useEnsureRecords(wf: Workflow, type: string, ids: unknown[]) {
     if (!list.length) return;
     list.forEach(id => requested.current.add(id));
     for (let i = 0; i < list.length; i += 100) {
-      void call<Page>(`/api/records/${encodeURIComponent(type)}?ids=${encodeURIComponent(list.slice(i, i + 100).join(','))}`).then(r => { if (r.ok) merge(type, r.data.items); });
+      void call<Page>(`/api/records/${encodeURIComponent(type)}?ids=${encodeURIComponent(list.slice(i, i + 100).join(','))}`).then(r => { if (r.ok && Array.isArray(r.data?.items)) merge(type, r.data.items); });
     }
   }, [wanted, type, call, merge]);
 }
