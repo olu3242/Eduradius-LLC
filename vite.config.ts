@@ -51,6 +51,7 @@ export default defineConfig(async ({ command }) => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
+    resolve: { alias: { "@/lib/server/platform": new URL("./lib/server/platform-cloudflare.ts", import.meta.url).pathname } },
     define: { __EDURADIUS_BUILD__: JSON.stringify(buildCommit()) },
     server: {
       ...(managedLinux

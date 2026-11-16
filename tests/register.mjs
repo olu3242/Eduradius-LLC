@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier === 'cloudflare:workers') {
+    if ((specifier === 'cloudflare:workers' || specifier === '@/lib/server/platform')) {
       return { url: new URL('./helpers/worker-env.mjs', import.meta.url).href, shortCircuit: true };
     }
     if (specifier.startsWith('.') && context.parentURL?.startsWith('file:')) {

@@ -1,6 +1,6 @@
 // Fixed-window rate limiter backed by D1 (`rate_limits`, migration 0001). Server-only.
 // Fails closed: callers treat a thrown error as "unavailable", never as "allowed".
-import { env } from 'cloudflare:workers';
+import { env } from '@/lib/server/platform';
 import { sha256Hex } from './http';
 
 export type Limit = { bucket: string; max: number; windowSeconds: number };
