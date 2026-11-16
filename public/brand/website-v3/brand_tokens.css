@@ -1,0 +1,11 @@
+:root {
+  --eduradius-forest: #173F35;
+  --eduradius-sage: #88A76D;
+  --eduradius-lime: #D3EB9E;
+  --eduradius-paper: #F8F8F2;
+  --eduradius-body: #667468;
+  --eduradius-line: #DDE5D6;
+  --font-display: "Manrope", Arial, sans-serif;
+  --font-body: "DM Sans", Arial, sans-serif;
+  --space-unit: 8px;
+}
