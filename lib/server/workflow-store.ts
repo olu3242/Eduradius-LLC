@@ -284,8 +284,11 @@ export async function importLegacyWorkflow(): Promise<{ imported: boolean; inqui
     db().prepare(`INSERT OR IGNORE INTO opportunities (id, title, agency, url, deadline, value, naics, psc, stage, decision, owner, notes, checks, status, version, created_at, updated_at)
       SELECT ${['id', 'title', 'agency', 'url', 'deadline', 'value', 'naics', 'psc', 'stage', 'decision', 'owner', 'notes', 'checks', 'status'].map(j).join(', ')}, 1, ${j('created_at')}, ${j('updated_at')} FROM json_each(?)`)
       .bind(JSON.stringify(opportunities)),
+    // An entry already imported (same text and time) is skipped even if its id differs, so a
+    // document rebuilt for a rollback (lib/legacy-rollback.ts) never duplicates activity.
     db().prepare(`INSERT OR IGNORE INTO activity_events (id, occurred_at, actor, type, subject_type, subject_id, summary, details)
-      SELECT ${j('id')}, ${j('occurred_at')}, 'system:legacy-import', 'legacy.entry', 'workspace', NULL, ${j('summary')}, '{}' FROM json_each(?)`)
+      SELECT ${j('id')}, ${j('occurred_at')}, 'system:legacy-import', 'legacy.entry', 'workspace', NULL, ${j('summary')}, '{}' FROM json_each(?)
+      WHERE NOT EXISTS (SELECT 1 FROM activity_events a WHERE a.type = 'legacy.entry' AND a.summary = ${j('summary')} AND a.occurred_at = ${j('occurred_at')})`)
       .bind(JSON.stringify(activity)),
     db().prepare('UPDATE workspaces SET data = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?')
       .bind(JSON.stringify(stripped), at, WORKSPACE_ID, stored.revision),
