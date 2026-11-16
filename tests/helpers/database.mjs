@@ -7,10 +7,11 @@ export const migrationFiles = () => readdirSync(MIGRATIONS).filter(f => /^\d{4}_
 // Executes the production migrations and SQL against real in-memory SQLite.
 // Only the D1 transport shape is adapted; no query results are fabricated.
 // `upTo` applies migrations through the given prefix (e.g. '0001') for upgrade tests.
-export function database({ upTo } = {}) {
-  const sqlite = new DatabaseSync(':memory:');
+// `file` opens an existing SQLite database (e.g. a local Miniflare D1 file) without migrating it.
+export function database({ upTo, file } = {}) {
+  const sqlite = new DatabaseSync(file ?? ':memory:');
   const applyMigration = file => sqlite.exec(readFileSync(new URL(file, MIGRATIONS), 'utf8'));
-  for (const file of migrationFiles()) { if (upTo && file.slice(0, 4) > upTo) break; applyMigration(file); }
+  if (!file) for (const name of migrationFiles()) { if (upTo && name.slice(0, 4) > upTo) break; applyMigration(name); }
   const statement = (sql, args = []) => ({
     bind(...values) { return statement(sql, values); },
     async first() { return sqlite.prepare(sql).get(...args) ?? null; },
