@@ -15,6 +15,13 @@ const T = 'J' + Date.now().toString(36);
 const results = [];
 const check = (name, pass, detail = '') => { results.push(Boolean(pass)); console.log(`${pass ? 'PASS' : 'FAIL'} ${name}${detail ? ' — ' + detail : ''}`); };
 
+// Reference pickers show at most 20 matches; type into the picker's search box first, the way an
+// owner would once the workspace holds more records than fit in one list.
+async function choose(scope, label, option, search = option) {
+  const select = scope.getByLabel(label);
+  await select.locator('xpath=preceding-sibling::input[@type="search"][1]').fill(search);
+  await select.selectOption({ label: option });
+}
 const browser = await chromium.launch();
 try {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 950 }, acceptDownloads: true });
@@ -100,8 +107,8 @@ try {
   // Converted opportunity → link organization/contact.
   await nav('Opportunities');
   await page.locator('.opportunity-card', { hasText: `AI governance RFP ${T}` }).getByRole('button', { name: /Open pursuit/ }).click(); await settle(300);
-  await page.getByLabel(/^Organization/).selectOption({ label: `Client ${T} District` });
-  await page.getByLabel(/^Primary contact/).selectOption({ label: `Pat ${T} · Director of Technology` });
+  await choose(page, /^Organization/, `Client ${T} District`);
+  await choose(page, /^Primary contact/, `Pat ${T} · Director of Technology`, `Pat ${T}`);
   await page.getByRole('button', { name: 'Save organization and contact' }).click(); await settle();
   check('opportunity linked to organization and contact', (await page.locator('.pursuit-header').innerText()).includes(`Client ${T} District`));
 
@@ -115,7 +122,7 @@ try {
     await save(d);
   }
   const samRow = page.locator('.requirement-list > li').filter({ has: page.locator('strong', { hasText: /^Active SAM registration$/ }) });
-  await samRow.getByLabel(/Link evidence/).selectOption({ label: `SAM record ${T}` });
+  await choose(samRow, /Link evidence/, `SAM record ${T}`);
   await samRow.getByRole('button', { name: 'Link', exact: true }).click(); await settle();
   await samRow.getByRole('button', { name: 'Edit' }).click();
   d = dialog(); await d.getByLabel('Status').selectOption('Met'); await save(d);
@@ -153,7 +160,7 @@ try {
   d = dialog();
   await d.locator('select').first().selectOption('Awarded');
   await d.getByLabel(/Outcome date/).fill('2026-12-01');
-  await d.getByLabel(/Award evidence/).selectOption({ label: `Award notice ${T} · Verified` });
+  await choose(d, /Award evidence/, `Award notice ${T} · Verified`, `Award notice ${T}`);
   await d.getByLabel(/I confirm the award/).check();
   await d.getByRole('button', { name: 'Save outcome' }).click(); await settle(900);
   check('award confirmed with evidence', (await panel().innerText()).includes('Awarded'));
@@ -205,7 +212,7 @@ try {
   d = dialog();
   await d.getByLabel(/Client acceptance — with/).check();
   await d.getByLabel(/Accepted by/).fill('Dr. Lee, Superintendent');
-  await d.getByLabel(/Acceptance evidence/).selectOption({ label: `Signed acceptance ${T}` });
+  await choose(d, /Acceptance evidence/, `Signed acceptance ${T}`);
   await d.getByRole('button', { name: 'Record acceptance' }).click(); await settle(900);
   check('revised version 2 accepted by recorded client authority', (await delRow().innerText()).includes('Accepted version 2 — Client acceptance by Dr. Lee'));
 
@@ -229,7 +236,7 @@ try {
   await page.getByLabel('Move project to').selectOption('Closing');
   await page.getByRole('button', { name: 'Apply status' }).click(); await settle();
   await tab('Closeout');
-  await panel().getByLabel('Final acceptance evidence').selectOption({ label: `Signed acceptance ${T} · Verified` });
+  await choose(panel(), 'Final acceptance evidence', `Signed acceptance ${T} · Verified`, `Signed acceptance ${T}`);
   await panel().getByLabel('Lessons learned').fill('Schedule stakeholder interviews before the holidays.');
   await panel().getByLabel('Archive and retention reviewed').check();
   await settle(300);

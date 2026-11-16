@@ -41,7 +41,7 @@ record('readiness (database, schema, access configured)', ok(ready), JSON.string
 record('responses carry a correlation id', Boolean(live.requestId));
 
 // 2. Access boundaries (anonymous, forged identity, invalid credentials)
-const privatePaths = ['/api/workspace', '/api/workflow'];
+const privatePaths = ['/api/workspace', '/api/workflow', '/api/records/inquiry', '/api/export'];
 for (const path of privatePaths) {
   record(`anonymous ${path} denied`, (await call(path, { auth: false })).status === 401);
   record(`forged Sites identity headers ignored on ${path}`, (await call(path, { auth: false, headers: { 'oai-authenticated-user-id': 'forged', 'oai-authenticated-user-email': 'forged@example.test' } })).status === 401);
@@ -63,7 +63,8 @@ cookie = (login.headers.get('set-cookie') ?? '').split(';')[0];
 record('owner sign-in issues an HttpOnly session', login.status === 200 && /HttpOnly/i.test(login.headers.get('set-cookie') ?? ''));
 
 // 5. End-to-end journey through the API
-const flow = async () => (await call('/api/workflow')).json;
+// The summary plus the complete export: every stored record (the workspace no longer sends all records on load).
+const flow = async () => ({ ...(await call('/api/workflow')).json, ...(await call('/api/export')).json?.workflow });
 let wf = await flow();
 let inquiry = wf.inquiries.find(i => i.organization === intake.organization);
 const patchInquiry = changes => call(`/api/inquiries/${inquiry.id}`, { method: 'PATCH', body: { version: inquiry.version, changes } });
@@ -123,6 +124,17 @@ const reread = await flow();
 record('records persist across a new session', reread.records.experience.some(e => e.projectId === project.id) && reread.records.project.find(x => x.id === project.id)?.status === 'Closed');
 const publicText = JSON.stringify((await call('/api/site', { auth: false })).json);
 record('public content excludes synthetic private records', !publicText.includes(RUN) && !publicText.includes('synthetic-staging@example.test'));
+
+// 7. Bounded reads: pagination, validation, reports and export completeness
+const first = await call('/api/records/inquiry?limit=1');
+const second = first.json?.page?.nextCursor ? await call(`/api/records/inquiry?limit=1&cursor=${encodeURIComponent(first.json.page.nextCursor)}`) : null;
+record('lists return bounded pages with a working cursor', first.status === 200 && first.json.items.length === 1 && (!first.json.page.hasMore || (second?.status === 200 && second.json.items[0]?.id !== first.json.items[0].id)));
+record('invalid list parameters are rejected', (await call('/api/records/inquiry?limit=1000')).status === 400 && (await call('/api/records/inquiry?cursor=bogus')).status === 400);
+const reportsResponse = await call('/api/reports');
+record('reports are computed on the server', ok(reportsResponse) && Array.isArray(reportsResponse.json?.metrics) && reportsResponse.json.metrics.every(m => typeof m.count === 'number'));
+const exported = await call('/api/export');
+const counts = exported.json?.manifest?.counts ?? {};
+record('export is complete (manifest matches every collection)', ok(exported) && counts.inquiries === exported.json.workflow.inquiries.length && Object.entries(exported.json.workflow.records).every(([t, l]) => counts[t] === l.length));
 
 const failed = results.filter(x => x.result === 'fail');
 console.log(JSON.stringify({ target: host, run: RUN, build: live.json?.build, passed: results.length - failed.length, total: results.length, results }, null, 2));

@@ -6,6 +6,7 @@ import * as create from '../app/api/records/[type]/route.ts';
 import * as update from '../app/api/records/[type]/[id]/route.ts';
 import * as actions from '../app/api/actions/[action]/route.ts';
 import * as workflowRoute from '../app/api/workflow/route.ts';
+import * as exportRoute from '../app/api/export/route.ts';
 import * as opportunitiesRoute from '../app/api/opportunities/route.ts';
 import * as intake from '../app/api/inquiries/route.ts';
 import * as site from '../app/api/site/route.ts';
@@ -27,7 +28,10 @@ const add = async (type, record, extra = {}, headers) => create.POST(req(`/api/r
 const added = async (type, record, extra) => { const r = await add(type, record, extra); assert.equal(r.status, 201, await r.clone().text()); return (await r.json()).record; };
 const edit = async (type, rec, changes, extra = {}, headers) => update.PATCH(req(`/api/records/${type}/${rec.id}`, 'PATCH', { version: rec.version, changes, ...extra }, headers), p({ type, id: rec.id }));
 const act = async (name, body, headers) => actions.POST(req(`/api/actions/${name}`, 'POST', body, headers), p({ action: name }));
-const snapshot = async () => (await workflowRoute.GET(req('/api/workflow', 'GET', undefined))).json();
+const snapshot = async () => {
+  const summary = await (await workflowRoute.GET(req('/api/workflow', 'GET', undefined))).json();
+  return { ...summary, ...(await (await exportRoute.GET(req('/api/export', 'GET', undefined))).json()).workflow };
+};
 const opportunity = async (title = 'State AI policy RFP', extra = {}) => (await (await opportunitiesRoute.POST(req('/api/opportunities', 'POST', { opportunity: { title, ...extra } }))).json()).opportunity;
 const rows = async sql => (await db.prepare(sql).all()).results;
 
@@ -180,7 +184,7 @@ test('stale versions conflict, and export plus public projection handle the new 
   await writeWorkspace(initialWorkspace(), 0);
   const text = await (await site.GET()).text();
   for (const secret of ['Riverside ISD', 'Dana Private', 'dana.private@example.test', 'Confidential pricing', 'Internal relationship note']) assert.ok(!text.includes(secret), secret);
-  const bundle = exportBundle(initialWorkspace(), await (await workflowRoute.GET(req('/api/workflow?activity=all', 'GET', undefined))).json());
+  const bundle = exportBundle(initialWorkspace(), await snapshot());
   assert.equal(bundle.workflow.records.organization.length, 1); assert.equal(bundle.workflow.records.contact.length, 1);
   assert.equal(bundle.workflow.records.evidence[0].id, ev.id);
   const types = (await rows('SELECT type, actor FROM activity_events')).map(r => r.type);

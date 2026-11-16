@@ -1,15 +1,16 @@
 'use client';
 // Deliverable review/acceptance, change control, closeout, experience records and reports.
-import { useMemo, useState } from 'react';
-import { AlertTriangle, Award, BarChart3, CheckCircle2, Circle, Plus } from 'lucide-react';
-import { SPECS, ACCEPTANCE_KINDS, closeoutChecklist, evidenceState, type Values } from '../../lib/records';
-import { operationalReport } from '../../lib/reports';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { AlertTriangle, Award, BarChart3, CheckCircle2, Circle, Plus, RefreshCw, Search } from 'lucide-react';
+import { SPECS, ACCEPTANCE_KINDS, closeoutChecklist, type Values } from '../../lib/records';
+import type { Metric } from '../../lib/reports';
 import { Alert, DueChip, StatusBadge, type Workflow } from './workflow';
 import { EvidenceChip, EvidenceLinks, RecordDialog, recs, saver, type PursuitTab } from './records-ui';
 import { Dialog, ReasonDialog } from './pursuit-ui';
+import { useEnsureRecords, usePagedList, useSubjectLinks } from './data';
+import { cached, ListFooter, ListGate, RefPicker } from './list-ui';
 
 const str = (v: unknown) => (typeof v === 'string' ? v : v === null || v === undefined ? '' : String(v));
-const evidenceOptions = (wf: Workflow) => recs(wf, 'evidence').filter(e => !['Rejected', 'Superseded'].includes(str(e.reviewStatus)));
 
 // ── Deliverables: review and acceptance ─────────────────────────────────────
 
@@ -42,8 +43,8 @@ export function DeliverablesPanel({ wf, project }: { wf: Workflow; project: Valu
         {!locked && d.status !== 'Ready for review' && <button className="button secondary" onClick={() => setDialog({ edit: d })}>{d.status === 'Accepted' ? 'Revise' : 'Edit'}</button>}
         {versions.some(v => v.deliverableId === d.id) && <button className="text-button" onClick={() => setDialog({ history: d })}>Versions</button>}
       </div></li>; })}</ul> : <p className="muted empty-row">No deliverables yet.</p>}
-    {dialog && 'create' in dialog && <RecordDialog spec={SPECS.deliverable} fixed={{ projectId: pid }} hide={['projectId']} title="Add deliverable" refOptions={{ milestone: milestones }} onClose={() => setDialog(null)} onSave={v => saver(wf.createRecord('deliverable', v))} />}
-    {dialog && 'edit' in dialog && dialog.edit && <RecordDialog spec={SPECS.deliverable} record={dialog.edit} title={dialog.edit.status === 'Accepted' ? 'Revise accepted deliverable' : 'Edit deliverable'} refOptions={{ milestone: milestones }} onClose={() => setDialog(null)} onSave={v => saver(wf.updateRecord('deliverable', dialog.edit!, v))}>
+    {dialog && 'create' in dialog && <RecordDialog wf={wf} spec={SPECS.deliverable} fixed={{ projectId: pid }} hide={['projectId']} title="Add deliverable" refOptions={{ milestone: milestones }} onClose={() => setDialog(null)} onSave={v => saver(wf.createRecord('deliverable', v))} />}
+    {dialog && 'edit' in dialog && dialog.edit && <RecordDialog wf={wf} spec={SPECS.deliverable} record={dialog.edit} title={dialog.edit.status === 'Accepted' ? 'Revise accepted deliverable' : 'Edit deliverable'} refOptions={{ milestone: milestones }} onClose={() => setDialog(null)} onSave={v => saver(wf.updateRecord('deliverable', dialog.edit!, v))}>
       {dialog.edit.status === 'Accepted' && <p className="muted">Changing the content starts a new draft that needs review. The accepted version stays on record.</p>}</RecordDialog>}
     {dialog && 'changes' in dialog && <ReasonDialog title="Request revision" label="What needs to change? *" onClose={() => setDialog(null)} onSubmit={async notes => { const r = await wf.action('deliverable.requestChanges', { id: dialog.changes.id, version: dialog.changes.version, notes }); if (!r.ok) setError(r.error); else setNotice('Revision requested; the submitted version is preserved.'); return r.ok; }} />}
     {dialog && 'accept' in dialog && <AcceptDialog wf={wf} deliverable={dialog.accept} onClose={() => setDialog(null)} onDone={m => setNotice(m)} />}
@@ -55,14 +56,13 @@ export function DeliverablesPanel({ wf, project }: { wf: Workflow; project: Valu
 function AcceptDialog({ wf, deliverable, onClose, onDone }: { wf: Workflow; deliverable: Values; onClose: () => void; onDone: (m: string) => void }) {
   const [form, setForm] = useState({ acceptanceKind: ACCEPTANCE_KINDS[0] as string, acceptanceAuthority: '', acceptanceEvidenceId: '', notes: '' });
   const [error, setError] = useState('');
-  const today = wf.data?.today ?? '', client = form.acceptanceKind === 'Client acceptance';
-  const options = recs(wf, 'evidence').filter(e => evidenceState(e, today) === 'current');
+  const client = form.acceptanceKind === 'Client acceptance';
   async function submit(e: React.FormEvent) { e.preventDefault(); const r = await wf.action('deliverable.accept', { id: deliverable.id, version: deliverable.version, ...form, acceptanceEvidenceId: form.acceptanceEvidenceId || null }); if (r.ok) { onDone(client ? 'Client acceptance recorded with verified evidence.' : 'Internal approval recorded. This is not client acceptance.'); onClose(); } else setError(r.error); }
   return <Dialog title="Record acceptance" eyebrow={str(deliverable.title).toUpperCase()} onClose={onClose}><form onSubmit={e => void submit(e)}>
     <fieldset className="refs-field"><legend>Type of acceptance</legend>{ACCEPTANCE_KINDS.map(k => <label key={k} className="inline-check"><input type="radio" name="kind" checked={form.acceptanceKind === k} onChange={() => setForm({ ...form, acceptanceKind: k })} />{k === 'Internal approval' ? 'Internal approval (workspace owner) — not client acceptance' : 'Client acceptance — with the client’s written acceptance'}</label>)}</fieldset>
     {client && <div className="form-grid">
       <label className="field wide"><span>Accepted by (name and role) *</span><input required maxLength={200} value={form.acceptanceAuthority} onChange={e => setForm({ ...form, acceptanceAuthority: e.target.value })} /></label>
-      <label className="field wide"><span>Acceptance evidence (verified) *</span><select required value={form.acceptanceEvidenceId} onChange={e => setForm({ ...form, acceptanceEvidenceId: e.target.value })}><option value="">Choose verified evidence…</option>{options.map(e => <option key={str(e.id)} value={str(e.id)}>{str(e.title)}</option>)}</select></label></div>}
+      <RefPicker wf={wf} type="evidence" wide required label="Acceptance evidence (verified)" placeholder="Choose verified evidence…" value={form.acceptanceEvidenceId || null} onChange={id => setForm({ ...form, acceptanceEvidenceId: id ?? '' })} filters={{ state: 'current' }} /></div>}
     <label className="field wide"><span>Notes</span><textarea rows={2} maxLength={4000} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></label>
     <Alert message={error} />
     <div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button type="submit" className="button primary">Record acceptance</button></div></form></Dialog>;
@@ -83,8 +83,8 @@ export function ChangesPanel({ wf, project }: { wf: Workflow; project: Values })
       <span className="chip-row"><StatusBadge status={str(c.status)} />{c.agreementReference ? <span className="muted">Agreement: {str(c.agreementReference)}</span> : null}</span>
       {c.decisionReason ? <small>Decision rationale: {str(c.decisionReason)}</small> : null}
     </div><div className="row-actions">{c.status === 'Proposed' && !locked && <><button className="button primary" onClick={() => setDialog({ decide: c })}>Record decision</button><button className="button secondary" onClick={() => setDialog({ edit: c })}>Edit</button></>}</div></li>)}</ul> : <p className="muted empty-row">No change requests.</p>}
-    {dialog && 'create' in dialog && <RecordDialog spec={SPECS.changeRequest} fixed={{ projectId: pid }} hide={['projectId']} title="Propose a change" onClose={() => setDialog(null)} onSave={v => saver(wf.createRecord('changeRequest', v))} />}
-    {dialog && 'edit' in dialog && <RecordDialog spec={SPECS.changeRequest} record={dialog.edit} title="Edit change request" onClose={() => setDialog(null)} onSave={v => saver(wf.updateRecord('changeRequest', dialog.edit, v))} />}
+    {dialog && 'create' in dialog && <RecordDialog wf={wf} spec={SPECS.changeRequest} fixed={{ projectId: pid }} hide={['projectId']} title="Propose a change" onClose={() => setDialog(null)} onSave={v => saver(wf.createRecord('changeRequest', v))} />}
+    {dialog && 'edit' in dialog && <RecordDialog wf={wf} spec={SPECS.changeRequest} record={dialog.edit} title="Edit change request" onClose={() => setDialog(null)} onSave={v => saver(wf.updateRecord('changeRequest', dialog.edit, v))} />}
     {dialog && 'decide' in dialog && <DecideDialog wf={wf} change={dialog.decide} onClose={() => setDialog(null)} />}
   </>;
 }
@@ -116,7 +116,7 @@ export function CloseoutPanel({ wf, project, onOpenExperience }: { wf: Workflow;
     {project.status === 'Closing' ? <form onSubmit={e => void close(e)} className="closeout-form">
       <ul className="checklist" aria-label="Closeout checklist">{checklist.map(c => <li key={c.key} className={c.passed ? 'passed' : 'open'}>{c.passed ? <CheckCircle2 size={16} aria-hidden="true" /> : <Circle size={16} aria-hidden="true" />}<span><strong>{c.label}</strong><small>{c.passed ? 'Done' : 'Open'} — {c.detail}</small></span></li>)}</ul>
       <div className="form-grid">
-        <label className="field wide"><span>Final acceptance evidence</span><select value={form.finalAcceptanceEvidenceId} onChange={e => setForm({ ...form, finalAcceptanceEvidenceId: e.target.value })}><option value="">Choose evidence…</option>{evidenceOptions(wf).map(e => <option key={str(e.id)} value={str(e.id)}>{str(e.title)} · {str(e.reviewStatus)}</option>)}</select></label>
+        <RefPicker wf={wf} type="evidence" wide label="Final acceptance evidence" placeholder="Choose evidence…" value={form.finalAcceptanceEvidenceId || null} onChange={id => setForm({ ...form, finalAcceptanceEvidenceId: id ?? '' })} filters={{ state: 'usable' }} labelOf={e => `${str(e.title)} · ${str(e.reviewStatus)}`} />
         <label className="field wide"><span>Lessons learned</span><textarea rows={3} maxLength={8000} value={form.lessonsLearned} onChange={e => setForm({ ...form, lessonsLearned: e.target.value })} /></label>
         <label className="field wide checkbox-field"><input type="checkbox" checked={form.archiveReviewed} onChange={e => setForm({ ...form, archiveReviewed: e.target.checked })} /><span>Archive and retention reviewed</span></label>
         <label className="field wide"><span>Retention notes</span><textarea rows={2} maxLength={4000} value={form.retentionNotes} onChange={e => setForm({ ...form, retentionNotes: e.target.value })} /></label>
@@ -141,17 +141,22 @@ export const deliveryTabs = (wf: Workflow, onOpenExperience: () => void) => (p: 
 
 export function ExperienceView({ wf }: { wf: Workflow }) {
   const [dialog, setDialog] = useState<null | { edit: Values } | { withdraw: Values }>(null);
-  const [error, setError] = useState('');
-  if (wf.state !== 'ready') return <section className="panel large-empty" aria-busy="true"><p className="muted">Loading experience records…</p></section>;
-  const items = recs(wf, 'experience'), today = wf.data!.today;
+  const [error, setError] = useState(''), [status, setStatus] = useState('All'), [query, setQuery] = useState('');
+  const list = usePagedList(wf, 'experience', { q: query, filters: { publicationStatus: status === 'All' ? undefined : status } });
+  const items = list.items, today = wf.data?.today ?? '';
+  useEnsureRecords(wf, 'evidence', items.map(e => e.permissionEvidenceId));
+  useSubjectLinks(wf, 'experience', items.map(e => e.id));
+  const filtered = status !== 'All' || Boolean(query.trim());
   async function review(e: Values, to: string) { setError(''); const r = await wf.action('experience.review', { id: e.id, version: e.version, to }); if (!r.ok) setError(r.error); }
   return <>
     <div className="notice"><Award size={16} aria-hidden="true" /><span>Experience records are private by default and come only from completed projects. Owner approval allows use in your capability statement draft; nothing is published to the website. Never add endorsements, ratings, savings, revenue, contract values, certifications or government past performance that are not evidenced.</span></div>
     <Alert message={error} />
-    {!items.length ? <section className="panel large-empty"><Award size={28} /><h2>No experience records yet.</h2><p>Close a project as completed, then create a private record from its Closeout tab.</p></section>
-      : <ul className="followup-list panel followup-section">{items.map(e => {
+    <div className="table-tools workflow-tools"><label className="search"><Search size={16} /><input type="search" aria-label="Search experience records" placeholder="Search experience records" value={query} onChange={e => setQuery(e.target.value)} /></label><div className="filter-row"><select aria-label="Filter by publication status" value={status} onChange={e => setStatus(e.target.value)}>{['All', ...(SPECS.experience.fields.find(f => f.key === 'publicationStatus')?.options ?? [])].map(s => <option key={s}>{s}</option>)}</select></div></div>
+    <ListGate list={list} noun="experience records" filtered={filtered} onClear={() => { setStatus('All'); setQuery(''); }}
+      empty={<section className="panel large-empty"><Award size={28} /><h2>No experience records yet.</h2><p>Close a project as completed, then create a private record from its Closeout tab.</p></section>}>
+      <ul className="followup-list panel followup-section">{items.map(e => {
         const prov = (e.provenance ?? {}) as Values, delivered = (e.verifiedDeliverables as Values[]) ?? [];
-        const permission = recs(wf, 'evidence').find(x => x.id === e.permissionEvidenceId);
+        const permission = cached(wf, 'evidence', e.permissionEvidenceId);
         return <li key={str(e.id)}><div>
           <strong>{str(e.title)}</strong><small>{str(e.clientLabel) || 'Client description not set'} · {str(e.startDate) || '—'} to {str(e.endDate) || '—'}</small>
           <span className="chip-row"><StatusBadge status={str(e.publicationStatus)} />{permission ? <EvidenceChip evidence={permission} today={today} /> : null}</span>
@@ -165,8 +170,10 @@ export function ExperienceView({ wf }: { wf: Workflow }) {
           {e.publicationStatus === 'Ready for owner review' && <><button className="button primary" onClick={() => void review(e, 'Approved for capability statement')}>Approve for capability statement</button><button className="text-button" onClick={() => void review(e, 'Private')}>Return to private</button></>}
           {e.publicationStatus === 'Approved for capability statement' && <button className="button secondary" onClick={() => setDialog({ withdraw: e })}>Withdraw approval</button>}
           {e.publicationStatus === 'Withdrawn' && <button className="text-button" onClick={() => void review(e, 'Private')}>Return to private</button>}
-        </div></li>; })}</ul>}
-    {dialog && 'edit' in dialog && <RecordDialog spec={SPECS.experience} record={dialog.edit} title="Edit experience record" eyebrow="PRIVATE BY DEFAULT" refOptions={{ evidence: evidenceOptions(wf).map(x => ({ id: str(x.id), label: str(x.title) })) }} onClose={() => setDialog(null)} onSave={v => saver(wf.updateRecord('experience', dialog.edit, v))}>
+        </div></li>; })}</ul>
+    </ListGate>
+    {list.state !== 'loading' && (items.length > 0 || filtered) && <ListFooter list={list} noun="experience records" />}
+    {dialog && 'edit' in dialog && <RecordDialog wf={wf} spec={SPECS.experience} record={dialog.edit} title="Edit experience record" eyebrow="PRIVATE BY DEFAULT" refFilters={{ evidence: { state: 'usable' } }} onClose={() => setDialog(null)} onSave={v => saver(wf.updateRecord('experience', dialog.edit, v))}>
       {dialog.edit.publicationStatus === 'Approved for capability statement' && <p className="muted">Editing an approved record returns it to private until it is reviewed again.</p>}</RecordDialog>}
     {dialog && 'withdraw' in dialog && <ReasonDialog title="Withdraw approval" label="Why is the approval withdrawn? *" onClose={() => setDialog(null)} onSubmit={async reason => { const r = await wf.action('experience.review', { id: dialog.withdraw.id, version: dialog.withdraw.version, to: 'Withdrawn', reason }); if (!r.ok) setError(r.error); return r.ok; }} />}
   </>;
@@ -174,17 +181,27 @@ export function ExperienceView({ wf }: { wf: Workflow }) {
 
 // ── Reports ─────────────────────────────────────────────────────────────────
 
+type ServerMetric = Metric & { count: number; truncated: boolean };
 export function ReportsView({ wf }: { wf: Workflow }) {
-  if (wf.state !== 'ready' || !wf.data) return <section className="panel large-empty" aria-busy="true"><p className="muted">Loading reports…</p></section>;
-  const metrics = operationalReport({ opportunities: wf.data.opportunities, records: wf.data.records ?? {}, evidenceLinks: wf.data.evidenceLinks ?? [] }, wf.data.today);
+  const [report, setReport] = useState<{ today: string; metrics: ServerMetric[]; itemLimit: number } | null>(null), [error, setError] = useState('');
+  const { call, revision } = wf;
+  const [attempt, setAttempt] = useState(0), seq = useRef(0);
+  useEffect(() => {
+    const mine = ++seq.current;
+    void call<{ today: string; metrics: ServerMetric[]; itemLimit: number }>('/api/reports').then(r => { if (mine !== seq.current) return; if (r.ok) { setReport(r.data); setError(''); } else setError(r.error); });
+  }, [call, revision, attempt]);
+  const load = () => setAttempt(a => a + 1);
+  if (!report || !wf.data) return error ? <section className="panel large-empty"><Alert message={error} /><button className="button secondary" onClick={() => void load()}><RefreshCw size={14} />Retry</button></section>
+    : <section className="panel large-empty" aria-busy="true"><p className="muted">Loading reports…</p></section>;
   return <>
-    <div className="notice"><BarChart3 size={16} aria-hidden="true" /><span>Operational tracking only — not accounting, invoicing or financial reporting. Dates use Central Time ({wf.data.businessTimeZone}); today is {wf.data.today}. “No records yet” means the source is empty, which is different from zero.</span></div>
-    <div className="report-grid">{metrics.map(m => <section className="panel followup-section" key={m.key} aria-labelledby={`rep-${m.key}`}>
-      <div className="panel-heading"><h2 id={`rep-${m.key}`}>{m.label}</h2><span className="report-count">{m.noData ? 'No records yet' : m.items.length}</span></div>
+    <div className="notice"><BarChart3 size={16} aria-hidden="true" /><span>Operational tracking only — not accounting, invoicing or financial reporting. Calculated on the server over every record. Dates use Central Time ({wf.data.businessTimeZone}); today is {report.today}. “No records yet” means the source is empty, which is different from zero.</span></div>
+    <Alert message={error} />
+    <div className="report-grid">{report.metrics.map(m => <section className="panel followup-section" key={m.key} aria-labelledby={`rep-${m.key}`}>
+      <div className="panel-heading"><h2 id={`rep-${m.key}`}>{m.label}</h2><span className="report-count">{m.noData ? 'No records yet' : m.count}</span></div>
       <p className="muted">{m.definition} <span className="report-source">Source: {m.source}.</span></p>
       {m.unavailable > 0 && <p className="field-hint">{m.unavailable} record{m.unavailable === 1 ? '' : 's'} could not be evaluated (missing date) and are not counted.</p>}
-      {m.items.length > 0 && <ul className="followup-list">{m.items.slice(0, 8).map(i => <li key={i.kind + i.id}><div><strong>{i.title}</strong><small>{i.detail}</small>{i.due ? <DueChip due={i.due} today={wf.data!.today} /> : null}</div></li>)}</ul>}
-      {m.items.length > 8 && <p className="muted">and {m.items.length - 8} more</p>}
+      {m.items.length > 0 && <ul className="followup-list">{m.items.slice(0, 8).map(i => <li key={i.kind + i.id}><div><strong>{i.title}</strong><small>{i.detail}</small>{i.due ? <DueChip due={i.due} today={report.today} /> : null}</div></li>)}</ul>}
+      {m.count > 8 && <p className="muted">and {m.count - 8} more</p>}
     </section>)}</div>
   </>;
 }

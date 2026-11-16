@@ -30,8 +30,8 @@ const s = (v: unknown) => (typeof v === 'string' ? v : v === null || v === undef
 const INQUIRY_COLUMNS = 'id, kind, name, organization, email, sector, scope, status, legacy_status, assignee, next_action, next_action_due, notes, reason, opportunity_id, source, version, created_at, updated_at';
 const OPPORTUNITY_COLUMNS = 'id, source_inquiry_id, title, agency, url, deadline, value, naics, psc, stage, decision, owner, notes, checks, status, contact_name, contact_email, sector, service, next_action, next_action_due, version, created_at, updated_at';
 // Read-only link columns (migration 0003); changed only by the inquiry.link / opportunity.link actions.
-const INQUIRY_SELECT = INQUIRY_COLUMNS + ', organization_id, contact_id';
-const OPPORTUNITY_SELECT = OPPORTUNITY_COLUMNS + ', organization_id, contact_id';
+export const INQUIRY_SELECT = INQUIRY_COLUMNS + ', organization_id, contact_id';
+export const OPPORTUNITY_SELECT = OPPORTUNITY_COLUMNS + ', organization_id, contact_id';
 
 export const toInquiry = (r: Row): InquiryRecord => ({
   id: s(r.id), kind: s(r.kind), name: s(r.name), organization: s(r.organization), email: s(r.email), sector: s(r.sector), scope: s(r.scope),

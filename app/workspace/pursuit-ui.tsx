@@ -6,6 +6,7 @@ import { SPECS, PROPOSAL_SECTIONS, SECTION_BASIS, SUBMISSION_METHODS, SUBMISSION
 import type { OpportunityRecord } from '../../lib/workflow';
 import { Alert, DueChip, StatusBadge, useDialog, type Workflow } from './workflow';
 import { EvidenceChip, EvidenceLinks, RecordDialog, recs, saver, type PursuitTab } from './records-ui';
+import { RefPicker } from './list-ui';
 
 const str = (v: unknown) => (typeof v === 'string' ? v : v === null || v === undefined ? '' : String(v));
 const escapeHtml = (t: string) => t.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
@@ -24,21 +25,20 @@ export { Dialog };
 export function TeamingPanel({ wf, opportunity }: { wf: Workflow; opportunity: OpportunityRecord }) {
   const [dialog, setDialog] = useState<null | { record?: Values }>(null);
   const today = wf.data?.today ?? '';
-  const orgs = recs(wf, 'organization').filter(o => o.status === 'Active');
+  const hasOrgs = (wf.data?.counts.organization ?? 0) > 0;
   const partners = recs(wf, 'teamingPartner').filter(t => t.opportunityId === opportunity.id);
   const orgName = (id: unknown) => str(recs(wf, 'organization').find(o => o.id === id)?.name) || 'Unknown organization';
-  const contacts = recs(wf, 'contact').filter(c => c.status === 'Active').map(c => ({ id: str(c.id), label: `${str(c.name)} — ${orgName(c.organizationId)}` }));
   return <>
     <div className="notice"><span>Partners listed here are proposed. Participation is confirmed only when an agreement is signed and its reference is recorded. Nothing is sent to partners from this workspace.</span></div>
-    <div className="section-toolbar"><span className="muted">{orgs.length ? '' : 'Add partner organizations on the Organizations page first.'}</span><button className="button primary" disabled={!orgs.length} onClick={() => setDialog({})}><Plus size={14} />Add partner</button></div>
+    <div className="section-toolbar"><span className="muted">{hasOrgs ? '' : 'Add partner organizations on the Organizations page first.'}</span><button className="button primary" disabled={!hasOrgs} onClick={() => setDialog({})}><Plus size={14} />Add partner</button></div>
     {partners.length ? <ul className="followup-list">{partners.map(t => <li key={str(t.id)}><div>
       <strong>{orgName(t.organizationId)} · {str(t.proposedRole)}</strong>
       <small>{t.discussionStatus === 'Agreement signed' ? `Agreement signed — ${str(t.agreementReference)}` : 'Proposed — participation not confirmed'}{t.relationshipOwner ? ` · Owner: ${str(t.relationshipOwner)}` : ''}</small>
       <span className="chip-row"><StatusBadge status={str(t.discussionStatus)} /><DueChip due={(t.nextActionDue as string | null) ?? null} today={today} /></span>
       {t.workPackage ? <small>Work package: {str(t.workPackage)}</small> : null}{t.capabilityFit ? <small>Capability fit: {str(t.capabilityFit)}</small> : null}{t.nextAction ? <small>Next action: {str(t.nextAction)}</small> : null}
     </div><div className="row-actions"><button className="button secondary" onClick={() => setDialog({ record: t })}>Edit</button></div></li>)}</ul> : <p className="muted empty-row">No teaming partners proposed for this opportunity.</p>}
-    {dialog && <RecordDialog spec={SPECS.teamingPartner} record={dialog.record} fixed={dialog.record ? {} : { opportunityId: opportunity.id }} hide={['opportunityId']} title={dialog.record ? 'Edit teaming partner' : 'Propose a teaming partner'} eyebrow={opportunity.title.toUpperCase()}
-      refOptions={{ organization: orgs.map(o => ({ id: str(o.id), label: str(o.name) })), contact: contacts }} onClose={() => setDialog(null)}
+    {dialog && <RecordDialog wf={wf} spec={SPECS.teamingPartner} record={dialog.record} fixed={dialog.record ? {} : { opportunityId: opportunity.id }} hide={['opportunityId']} title={dialog.record ? 'Edit teaming partner' : 'Propose a teaming partner'} eyebrow={opportunity.title.toUpperCase()}
+      onClose={() => setDialog(null)}
       onSave={v => saver(dialog.record ? wf.updateRecord('teamingPartner', dialog.record, v) : wf.createRecord('teamingPartner', v))} />}
   </>;
 }
@@ -126,7 +126,8 @@ function ProposalEditor({ wf, opportunity, proposal }: { wf: Workflow; opportuni
       <legend>{label}</legend>
       <label className="field wide"><span className="sr-only">{label} text</span><textarea rows={key === 'executiveSummary' || key === 'approach' ? 5 : 3} maxLength={20000} value={sec.body} onChange={e => setSection(key, { body: e.target.value })} /></label>
       <label className="field"><span>Basis for {label.toLowerCase()}</span><select value={sec.basis} onChange={e => setSection(key, { basis: e.target.value })}>{SECTION_BASIS.map(b => <option key={b}>{b}</option>)}</select></label>
-      {sec.basis === SECTION_BASIS[2] && <div className="field wide"><span>Supporting evidence for {label.toLowerCase()}</span><div className="evidence-picker">{evidence.length ? evidence.map(e => <label key={str(e.id)} className="inline-check"><input type="checkbox" checked={sec.refs.includes(str(e.id))} onChange={ev => setSection(key, { refs: ev.target.checked ? [...sec.refs, str(e.id)] : sec.refs.filter(r => r !== e.id) })} />{str(e.title)} <EvidenceChip evidence={e} today={today} /></label>) : <span className="muted">Add evidence in the register first.</span>}</div>
+      {sec.basis === SECTION_BASIS[2] && <div className="field wide"><span>Supporting evidence for {label.toLowerCase()}</span><div className="evidence-picker">{sec.refs.map(id => { const e = evidence.find(x => x.id === id); return <label key={id} className="inline-check"><input type="checkbox" checked onChange={() => setSection(key, { refs: sec.refs.filter(r => r !== id) })} />{e ? str(e.title) : 'Loading…'} {e && <EvidenceChip evidence={e} today={today} />}</label>; })}
+          <RefPicker wf={wf} type="evidence" label={`Add supporting evidence for ${label.toLowerCase()}`} placeholder="Add evidence…" value={null} onChange={id => id && setSection(key, { refs: [...sec.refs, id] })} filters={{ state: 'usable' }} exclude={sec.refs} /></div>
         {sec.refs.some(r => { const e = evidence.find(x => x.id === r); return !e || evidenceState(e, today) !== 'current'; }) && <small className="field-hint">Approval requires verified, unexpired evidence for verified sections.</small>}</div>}
     </fieldset>; })}
     {!locked && <div className="section-toolbar"><span className="muted" aria-live="polite">{dirty ? 'Unsaved changes' : 'All changes saved'}</span><button className="button primary" disabled={busy || !dirty} onClick={() => void save()}>Save proposal</button></div>}
@@ -175,20 +176,19 @@ export function SubmissionPanel({ wf, opportunity }: { wf: Workflow; opportunity
     </div><div className="row-actions"><button className="button secondary" onClick={() => setDialog({ outcome: s })}>Record outcome</button><button className="text-button" onClick={() => setDialog({ edit: s })}>Edit details</button></div></li>; })}</ul>
       : <p className="muted empty-row">No submission recorded. Approve the proposal in owner review, then record the submission from the Proposal tab.</p>}
     {dialog && 'outcome' in dialog && <OutcomeDialog wf={wf} submission={dialog.outcome} onClose={() => setDialog(null)} />}
-    {dialog && 'edit' in dialog && <RecordDialog spec={SPECS.submission} record={dialog.edit} title="Edit submission details" onClose={() => setDialog(null)} onSave={v => saver(wf.updateRecord('submission', dialog.edit, v))} />}
+    {dialog && 'edit' in dialog && <RecordDialog wf={wf} spec={SPECS.submission} record={dialog.edit} title="Edit submission details" onClose={() => setDialog(null)} onSave={v => saver(wf.updateRecord('submission', dialog.edit, v))} />}
   </>;
 }
 
 function OutcomeDialog({ wf, submission, onClose }: { wf: Workflow; submission: Values; onClose: () => void }) {
   const [form, setForm] = useState({ outcome: str(submission.outcome) || 'Pending', outcomeDate: str(submission.outcomeDate), outcomeNotes: str(submission.outcomeNotes), awardEvidenceId: str(submission.awardEvidenceId), confirmAward: false });
   const [error, setError] = useState('');
-  const evidence = recs(wf, 'evidence').filter(e => !['Rejected', 'Superseded'].includes(str(e.reviewStatus)));
   const awarded = form.outcome === 'Awarded';
   async function submit(e: React.FormEvent) { e.preventDefault(); const r = await wf.action('submission.recordOutcome', { id: submission.id, version: submission.version, ...form, outcomeDate: form.outcomeDate || null, awardEvidenceId: form.awardEvidenceId || null }); if (r.ok) onClose(); else setError(r.error); }
   return <Dialog title="Record outcome" eyebrow="SUBMISSION RECORD" onClose={onClose}><form onSubmit={e => void submit(e)}>
     <div className="form-grid"><label className="field"><span>Outcome</span><select value={form.outcome} onChange={e => setForm({ ...form, outcome: e.target.value })}>{SUBMISSION_OUTCOMES.map(o => <option key={o}>{o}</option>)}</select></label>
       <label className="field"><span>Outcome date{awarded ? ' *' : ''}</span><input type="date" required={awarded} value={form.outcomeDate} onChange={e => setForm({ ...form, outcomeDate: e.target.value })} /></label>
-      {awarded && <label className="field wide"><span>Award evidence (notice of award or signed contract) *</span><select required value={form.awardEvidenceId} onChange={e => setForm({ ...form, awardEvidenceId: e.target.value })}><option value="">Choose evidence…</option>{evidence.map(e => <option key={str(e.id)} value={str(e.id)}>{str(e.title)} · {str(e.reviewStatus)}</option>)}</select></label>}
+      {awarded && <RefPicker wf={wf} type="evidence" wide required label="Award evidence (notice of award or signed contract)" placeholder="Choose evidence…" value={form.awardEvidenceId || null} onChange={id => setForm({ ...form, awardEvidenceId: id ?? '' })} filters={{ state: 'usable' }} labelOf={e => `${str(e.title)} · ${str(e.reviewStatus)}`} />}
       <label className="field wide"><span>Outcome notes</span><textarea rows={2} maxLength={4000} value={form.outcomeNotes} onChange={e => setForm({ ...form, outcomeNotes: e.target.value })} /></label>
       {awarded && <label className="field wide checkbox-field"><input type="checkbox" checked={form.confirmAward} onChange={e => setForm({ ...form, confirmAward: e.target.checked })} required /><span>I confirm the award was received in writing. Recording it does not accept, sign or create any agreement.</span></label>}</div>
     <Alert message={error} /><div className="modal-footer"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button type="submit" className="button primary">Save outcome</button></div></form></Dialog>;

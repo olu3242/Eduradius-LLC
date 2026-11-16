@@ -22,7 +22,7 @@ try {
     await post('/api/records/organization', { record: { name: `Synthetic Org ${T} ${i}`, notes: longText(3000), orgType: i % 2 ? 'Government buyer' : 'Teaming partner' }, confirmDistinct: true });
     await post('/api/opportunities', { opportunity: { title: `Synthetic opportunity ${T} ${i} ${longWord.slice(0, 120)}`, notes: longText(6000), agency: `Agency ${i}` } });
   }
-  const opp = (await (await page.request.get(BASE + '/api/workflow')).json()).opportunities.find(o => o.title.startsWith(`Synthetic opportunity ${T} 0 `));
+  const opp = (await (await page.request.get(`${BASE}/api/records/opportunity?q=${encodeURIComponent(`Synthetic opportunity ${T} 0 `)}&limit=100`)).json()).items.find(o => o.title.startsWith(`Synthetic opportunity ${T} 0 `));
   for (let i = 0; i < 50; i++) await post('/api/records/requirement', { record: { opportunityId: opp.id, description: longText(1900), owner: 'Owner ' + i } });
   for (let i = 0; i < 60; i++) await post('/api/records/evidence', { record: { title: `Synthetic evidence ${T} ${i}`, location: longText(480), notes: longText(3500) } });
   console.log(`seeded 80 organizations, 80 opportunities, 50 requirements, 60 evidence in ${Date.now() - t0} ms`);
@@ -31,7 +31,8 @@ try {
   const payload = await page.request.get(BASE + '/api/workflow');
   const bytes = (await payload.body()).length;
   console.log(`GET /api/workflow: ${Date.now() - workflowStart} ms, ${(bytes / 1024).toFixed(0)} KiB (local dev server, Chromium, this machine)`);
-  check('workflow payload returns successfully at this volume', payload.status() === 200);
+  check('workflow summary returns successfully at this volume', payload.status() === 200);
+  check('workflow summary stays small (no record collections)', bytes < 64 * 1024, `${bytes} bytes`);
 
   const overflow = p => p.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   const timed = async (label, fn) => { const s = Date.now(); await fn(); const ms = Date.now() - s; console.log(`${label}: ${ms} ms`); return ms; };
@@ -40,6 +41,18 @@ try {
     await timed(`${name} page render`, async () => { await page.locator('nav button', { hasText: name }).first().click(); await page.waitForSelector('main .panel'); });
     check(`${name}: long unbroken text does not cause horizontal overflow (desktop)`, (await overflow(page)) <= 1);
   }
+  // Paging: the first page is bounded, "Load more" appends the next page, search reaches the oldest record.
+  await page.locator('nav button', { hasText: 'Organizations' }).first().click(); await page.locator('.opportunity-card').first().waitFor();
+  check('organizations show one bounded page first', (await page.locator('.opportunity-card').count()) === 25);
+  await page.getByRole('button', { name: 'Load more organizations' }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.opportunity-card').length === 50);
+  check('load more appends the next page', (await page.locator('.opportunity-card').count()) === 50);
+  check('result count announces loaded and total', /Showing 50 of \d+ organizations/.test(await page.locator('.result-count').innerText()));
+  await page.getByPlaceholder('Search organizations').fill(`Synthetic Org ${T} 0`);
+  await page.locator('.opportunity-card h2', { hasText: new RegExp(`^Synthetic Org ${T} 0$`) }).waitFor();
+  check('search finds the oldest record beyond the loaded pages (server-side)', (await page.locator('.opportunity-card').count()) <= 25);
+  await page.locator('nav button', { hasText: 'Opportunities' }).first().click();
+  await page.getByPlaceholder('Search opportunities').fill(`Synthetic opportunity ${T} 0 `);
   await page.locator('.opportunity-card', { hasText: `Synthetic opportunity ${T} 0 ` }).getByRole('button', { name: /Open pursuit/ }).click();
   await timed('pursuit requirements tab (50 long requirements)', async () => { await page.getByRole('tab', { name: 'Requirements' }).click(); await page.waitForSelector('.requirement-list li'); });
   check('requirements tab lists all 50 items', (await page.locator('.requirement-list > li').count()) === 50);

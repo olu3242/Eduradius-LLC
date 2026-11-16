@@ -11,6 +11,7 @@ import * as opportunitiesRoute from '../app/api/opportunities/route.ts';
 import * as opportunityRoute from '../app/api/opportunities/[id]/route.ts';
 import * as notificationsRoute from '../app/api/notifications/route.ts';
 import * as workflowRoute from '../app/api/workflow/route.ts';
+import * as exportRoute from '../app/api/export/route.ts';
 import { importLegacyWorkflow } from '../lib/server/workflow-store.ts';
 import { readWorkspace, writeWorkspace } from '../lib/server/workspace-store.ts';
 import { initialWorkspace } from '../lib/workspace.ts';
@@ -35,7 +36,13 @@ beforeEach(() => {
 afterEach(() => db?.close());
 
 const submit = async (body = publicInquiry, headers = {}) => intake.POST(req('/api/inquiries', 'POST', body, { 'cf-connecting-ip': crypto.randomUUID(), ...headers }));
-const workflow = async (headers = owner) => (await workflowRoute.GET(req('/api/workflow', 'GET', undefined, headers))).json();
+// Summary (counts, unread notifications) merged with the complete export (every record).
+const workflow = async (headers = owner) => {
+  const summary = await workflowRoute.GET(req('/api/workflow', 'GET', undefined, headers));
+  if (summary.status !== 200) return summary.json();
+  const bundle = await (await exportRoute.GET(req('/api/export', 'GET', undefined, headers))).json();
+  return { ...(await summary.json()), ...bundle.workflow };
+};
 const patch = (id, version, changes, headers = owner, extra = {}) => inquiryRoute.PATCH(req(`/api/inquiries/${id}`, 'PATCH', { version, changes, ...extra }, headers), params(id));
 const convert = (id, version, opportunity, headers = owner) => convertRoute.POST(req(`/api/inquiries/${id}/convert`, 'POST', { version, opportunity }, headers), params(id));
 const rows = async sql => (await db.prepare(sql).all()).results;

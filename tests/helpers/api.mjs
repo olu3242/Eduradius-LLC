@@ -7,6 +7,7 @@ import * as create from '../../app/api/records/[type]/route.ts';
 import * as update from '../../app/api/records/[type]/[id]/route.ts';
 import * as actions from '../../app/api/actions/[action]/route.ts';
 import * as workflowRoute from '../../app/api/workflow/route.ts';
+import * as exportRoute from '../../app/api/export/route.ts';
 import * as opportunitiesRoute from '../../app/api/opportunities/route.ts';
 
 export const token = 'test-only-access-key-with-at-least-32-characters';
@@ -25,7 +26,12 @@ export const edit = (type, rec, changes, extra = {}, headers) => update.PATCH(re
 export async function edited(type, rec, changes) { const r = await edit(type, rec, changes); assert.equal(r.status, 200, await r.clone().text()); return (await r.json()).record; }
 export const act = (name, body, headers) => actions.POST(req(`/api/actions/${name}`, 'POST', body, headers), p({ action: name }));
 export async function acted(name, body, status = 200) { const r = await act(name, body); assert.equal(r.status, status, `${name}: ${await r.clone().text()}`); return r.json(); }
-export const snapshot = async () => (await workflowRoute.GET(req('/api/workflow?activity=all', 'GET', undefined))).json();
+/** Summary merged with the complete export, i.e. every stored record. */
+export const snapshot = async () => {
+  const summary = await (await workflowRoute.GET(req('/api/workflow', 'GET', undefined))).json();
+  const bundle = await (await exportRoute.GET(req('/api/export', 'GET', undefined))).json();
+  return { ...summary, ...bundle.workflow, manifest: bundle.manifest };
+};
 export const opportunity = async (title = 'State AI policy RFP', extra = {}) => (await (await opportunitiesRoute.POST(req('/api/opportunities', 'POST', { opportunity: { title, ...extra } }))).json()).opportunity;
 export const rows = async sql => (await ctx.db.prepare(sql).all()).results;
 export const record = async (type, id) => (await snapshot()).records[type].find(r => r.id === id);

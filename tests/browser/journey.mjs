@@ -112,7 +112,7 @@ try {
   await d.getByRole('button', { name: 'Cancel' }).click();
 
   // 7. Duplicate conversion attempt (retry) creates nothing new.
-  const wf = await (await page.request.get(BASE + '/api/workflow')).json();
+  const wf = (await (await page.request.get(BASE + '/api/export')).json()).workflow;
   const inq = wf.inquiries.find(i => i.organization === ORG);
   const retry = await page.request.post(`${BASE}/api/inquiries/${inq.id}/convert`, { data: { version: inq.version, opportunity: { title: 'Duplicate' } } });
   check('retrying conversion returns the existing opportunity', retry.status() === 200 && (await retry.json()).alreadyConverted === true);

@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { sqliteTable, text, integer, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
 export const workspaces = sqliteTable('workspaces', { id: text('id').primaryKey(), data: text('data').notNull(), revision: integer('revision').notNull().default(1), updatedAt: text('updated_at').notNull() });
 // Fixed-window counters for public intake and sign-in (key = bucket:sha256(client)).
@@ -29,7 +30,7 @@ export const inquiries = sqliteTable('inquiries', {
   lastRequestId: text('last_request_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
-}, t => [index('inquiries_status_idx').on(t.status), index('inquiries_created_idx').on(t.createdAt)]);
+}, t => [index('inquiries_status_idx').on(t.status), index('inquiries_created_idx').on(t.createdAt), index('inquiries_created_id_idx').on(t.createdAt, t.id), index('inquiries_org_idx').on(t.organizationId), index('inquiries_due_idx').on(t.nextActionDue)]);
 
 export const opportunities = sqliteTable('opportunities', {
   id: text('id').primaryKey(),
@@ -59,7 +60,7 @@ export const opportunities = sqliteTable('opportunities', {
   lastRequestId: text('last_request_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
-}, t => [uniqueIndex('opportunities_source_inquiry_uq').on(t.sourceInquiryId)]);
+}, t => [uniqueIndex('opportunities_source_inquiry_uq').on(t.sourceInquiryId), index('opportunities_created_id_idx').on(t.createdAt, t.id), index('opportunities_updated_id_idx').on(t.updatedAt, t.id), index('opportunities_org_idx').on(t.organizationId), index('opportunities_due_idx').on(t.nextActionDue)]);
 
 // Append-only. Actor and timestamps are always server-generated.
 export const activityEvents = sqliteTable('activity_events', {
@@ -84,7 +85,7 @@ export const notifications = sqliteTable('notifications', {
   createdAt: text('created_at').notNull(),
   readAt: text('read_at'),
   emailStatus: text('email_status').notNull().default('disabled'),
-}, t => [uniqueIndex('notifications_dedupe_uq').on(t.dedupeKey)]);
+}, t => [uniqueIndex('notifications_dedupe_uq').on(t.dedupeKey), index('notifications_unread_idx').on(t.readAt, t.createdAt)]);
 
 // Pre-migration copies of the workspace document (non-destructive legacy import).
 export const workspaceSnapshots = sqliteTable('workspace_snapshots', {
@@ -117,7 +118,7 @@ export const organizations = sqliteTable('organizations', {
   nameKey: text('name_key').notNull().default(''),
   domain: text('domain').notNull().default(''),
   ...recordColumns(),
-}, t => [index('organizations_name_key_idx').on(t.nameKey), index('organizations_domain_idx').on(t.domain)]);
+}, t => [index('organizations_name_key_idx').on(t.nameKey), index('organizations_domain_idx').on(t.domain), index('organizations_created_id_idx').on(t.createdAt, t.id), index('organizations_name_lower_idx').on(sql`lower(${t.name})`, t.id)]);
 
 export const contacts = sqliteTable('contacts', {
   id: text('id').primaryKey(),
@@ -133,7 +134,7 @@ export const contacts = sqliteTable('contacts', {
   mergedIntoId: text('merged_into_id'),
   emailKey: text('email_key').notNull().default(''),
   ...recordColumns(),
-}, t => [index('contacts_org_idx').on(t.organizationId), index('contacts_email_key_idx').on(t.emailKey)]);
+}, t => [index('contacts_org_idx').on(t.organizationId), index('contacts_email_key_idx').on(t.emailKey), index('contacts_created_id_idx').on(t.createdAt, t.id), index('contacts_name_lower_idx').on(sql`lower(${t.name})`, t.id)]);
 
 export const requirements = sqliteTable('requirements', {
   id: text('id').primaryKey(),
@@ -161,7 +162,7 @@ export const evidence = sqliteTable('evidence', {
   url: text('url').notNull().default(''),
   notes: text('notes').notNull().default(''),
   ...recordColumns(),
-});
+}, t => [index('evidence_created_id_idx').on(t.createdAt, t.id), index('evidence_title_lower_idx').on(sql`lower(${t.title})`, t.id), index('evidence_review_date_idx').on(t.reviewDate)]);
 
 export const evidenceLinks = sqliteTable('evidence_links', {
   id: text('id').primaryKey(),
@@ -262,7 +263,7 @@ export const projects = sqliteTable('projects', {
   nextAction: text('next_action').notNull().default(''),
   nextActionDue: text('next_action_due'),
   ...recordColumns(),
-}, t => [uniqueIndex('projects_opportunity_uq').on(t.opportunityId)]);
+}, t => [uniqueIndex('projects_opportunity_uq').on(t.opportunityId), index('projects_created_id_idx').on(t.createdAt, t.id), index('projects_status_idx').on(t.status)]);
 
 // The first baseline is the award baseline; later ones come only from approved changes.
 export const projectBaselines = sqliteTable('project_baselines', {
@@ -395,4 +396,4 @@ export const experienceRecords = sqliteTable('experience_records', {
   reviewedAt: text('reviewed_at').notNull().default(''),
   provenance: text('provenance').notNull().default('{}'),
   ...recordColumns(),
-}, t => [uniqueIndex('experience_records_project_uq').on(t.projectId)]);
+}, t => [uniqueIndex('experience_records_project_uq').on(t.projectId), index('experience_records_created_id_idx').on(t.createdAt, t.id)]);

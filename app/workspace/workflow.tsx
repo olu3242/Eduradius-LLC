@@ -1,59 +1,18 @@
 'use client';
 // Connected intake → opportunity workflow UI for the owner workspace.
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import NextLink from 'next/link';
 import { ArrowUpRight, BellRing, Check, CheckCircle2, Clock3, MessagesSquare, RefreshCw, Search, X } from 'lucide-react';
 import {
-  actorLabel, allowedTransitions, conversionDraft, dueState, followUpQueue, INQUIRY_STATUSES, OPPORTUNITY_STAGES, REASON_REQUIRED,
-  type ActivityRecord, type FollowUpItem, type InquiryRecord, type InquiryStatus, type OpportunityInput, type OpportunityRecord, type WorkflowSnapshot,
+  actorLabel, allowedTransitions, conversionDraft, dueState, INQUIRY_STATUSES, OPPORTUNITY_STAGES, REASON_REQUIRED,
+  type ActivityRecord, type FollowUpItem, type InquiryRecord, type InquiryStatus, type OpportunityInput, type OpportunityRecord,
 } from '../../lib/workflow';
 import { serviceNames } from '../../lib/workspace';
 
-export type AuthInfo = { mode: string; signInUrl?: string; signOutUrl?: string };
-type CallResult<T> = { ok: true; status: number; data: T } | { ok: false; status: number; error: string; body: RecordValues };
-type RecordValues = Record<string, unknown>;
+export { useWorkflow, type AuthInfo, type Workflow } from './data';
+import { useEnsureRecords, usePagedList, useRecordContext, type Workflow, type Summary } from './data';
+import { ListFooter, ListGate } from './list-ui';
 type Conversion = { inquiry: InquiryRecord; opportunity: OpportunityRecord; alreadyConverted: boolean };
-
-// ── Data hook ───────────────────────────────────────────────────────────────
-
-export function useWorkflow(onAuthRequired: (auth: AuthInfo, message: string) => void) {
-  const [data, setData] = useState<WorkflowSnapshot | null>(null);
-  const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
-  const [error, setError] = useState('');
-  const call = useCallback(async <T,>(url: string, method = 'GET', body?: unknown): Promise<CallResult<T>> => {
-    let response: Response;
-    try {
-      response = await fetch(url, { method, headers: body === undefined ? undefined : { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
-    } catch { return { ok: false, status: 0, error: 'Network error. Check your connection and try again.', body: {} }; }
-    const json = await response.json().catch(() => ({})) as { error?: string; auth?: AuthInfo };
-    if (json.auth && [401, 403].includes(response.status)) onAuthRequired(json.auth, response.status === 401 ? 'Your session has ended. Sign in again to continue; open dialogs keep your changes.' : json.error || 'This account cannot access the workspace.');
-    return response.ok ? { ok: true, status: response.status, data: json as T } : { ok: false, status: response.status, error: json.error || 'Request failed. Please try again.', body: json as RecordValues };
-  }, [onAuthRequired]);
-  const reload = useCallback(async () => {
-    setState(s => (s === 'ready' ? 'ready' : 'loading'));
-    const result = await call<WorkflowSnapshot>('/api/workflow');
-    if (result.ok) { setData(result.data); setState('ready'); setError(''); }
-    else if (![401, 403].includes(result.status)) { setError(result.error); setState(s => (s === 'ready' ? 'ready' : 'error')); }
-    return result;
-  }, [call]);
-  const mutate = useCallback(async <T,>(url: string, method: string, body: unknown) => {
-    const result = await call<T>(url, method, body);
-    if (result.ok || result.status === 409) void reload();
-    return result;
-  }, [call, reload]);
-  return {
-    data, state, error, reload, call,
-    patchInquiry: (inquiry: InquiryRecord, changes: Record<string, unknown>) => mutate<{ inquiry: InquiryRecord }>(`/api/inquiries/${encodeURIComponent(inquiry.id)}`, 'PATCH', { version: inquiry.version, changes }),
-    convert: (inquiry: InquiryRecord, opportunity: OpportunityInput) => mutate<Conversion>(`/api/inquiries/${encodeURIComponent(inquiry.id)}/convert`, 'POST', { version: inquiry.version, opportunity }),
-    createOpportunity: (opportunity: OpportunityInput) => mutate<{ opportunity: OpportunityRecord }>('/api/opportunities', 'POST', { opportunity }),
-    updateOpportunity: (id: string, version: number, changes: OpportunityInput) => mutate<{ opportunity: OpportunityRecord }>(`/api/opportunities/${encodeURIComponent(id)}`, 'PATCH', { version, changes }),
-    markRead: (body: { ids: string[] } | { all: true }) => mutate<{ updated: number }>('/api/notifications', 'POST', body),
-    createRecord: (type: string, record: RecordValues, confirmDistinct = false) => mutate<{ record: RecordValues; duplicates?: RecordValues[] }>(`/api/records/${encodeURIComponent(type)}`, 'POST', { record, confirmDistinct }),
-    updateRecord: (type: string, current: RecordValues, changes: RecordValues, confirmDistinct = false) => mutate<{ record: RecordValues }>(`/api/records/${encodeURIComponent(type)}/${encodeURIComponent(String(current.id))}`, 'PATCH', { version: current.version, changes, confirmDistinct }),
-    action: <T = RecordValues,>(name: string, body: RecordValues) => mutate<T>(`/api/actions/${encodeURIComponent(name)}`, 'POST', body),
-  };
-}
-export type Workflow = ReturnType<typeof useWorkflow>;
 
 // ── Shared pieces ───────────────────────────────────────────────────────────
 
@@ -111,44 +70,37 @@ export function ActivityList({ items, empty }: { items: ActivityRecord[]; empty:
 
 export function InquiryBoard({ wf, onReview, onConvert, onOpenOpportunity }: { wf: Workflow; onReview: (id: string) => void; onConvert: (id: string) => void; onOpenOpportunity: (id: string) => void }) {
   const [query, setQuery] = useState(''), [status, setStatus] = useState('Open requests'), [assignee, setAssignee] = useState('Anyone');
-  const inquiries = useMemo(() => wf.data?.inquiries ?? [], [wf.data]);
+  const filters = { open: status === 'Open requests' ? 'true' : undefined, status: !['Open requests', 'All statuses'].includes(status) ? status : undefined, assignee: assignee === 'Anyone' ? undefined : assignee === 'Unassigned' ? 'none' : assignee };
+  const list = usePagedList(wf, 'inquiry', { q: query, filters });
+  const inquiries = list.items as unknown as InquiryRecord[];
   const today = wf.data?.today ?? '';
-  const assignees = useMemo(() => [...new Set(inquiries.map(i => i.assignee).filter(Boolean))].sort(), [inquiries]);
-  const visible = inquiries.filter(i => {
-    const q = query.trim().toLowerCase();
-    if (q && ![i.organization, i.name, i.scope, i.kind].some(v => v.toLowerCase().includes(q))) return false;
-    if (status === 'Open requests' && (i.status === 'Converted' || i.status === 'Closed')) return false;
-    if (status !== 'Open requests' && status !== 'All statuses' && i.status !== status) return false;
-    if (assignee === 'Unassigned' && i.assignee) return false;
-    if (assignee !== 'Anyone' && assignee !== 'Unassigned' && i.assignee !== assignee) return false;
-    return true;
-  });
-  if (wf.state === 'loading' || wf.state === 'idle') return <section className="panel large-empty" aria-busy="true"><p className="muted">Loading requests…</p></section>;
-  if (wf.state === 'error') return <section className="panel large-empty"><Alert message={wf.error} /><button className="button secondary" onClick={() => void wf.reload()}><RefreshCw size={14} />Retry</button></section>;
-  if (!inquiries.length) return <section className="panel large-empty"><MessagesSquare size={28} /><h2>No briefing requests yet.</h2><p>The company page includes a form for project and teaming inquiries.</p><NextLink className="button secondary" href="/#contact">View briefing form <ArrowUpRight size={14} /></NextLink></section>;
+  const filtered = Boolean(query.trim()) || status !== 'Open requests' || assignee !== 'Anyone';
+  const empty = <section className="panel large-empty"><MessagesSquare size={28} /><h2>No briefing requests yet.</h2><p>The company page includes a form for project and teaming inquiries.</p><NextLink className="button secondary" href="/#contact">View briefing form <ArrowUpRight size={14} /></NextLink></section>;
   return <>
     <div className="table-tools workflow-tools">
-      <label className="search"><Search size={16} /><input aria-label="Search requests" placeholder="Search requests" value={query} onChange={e => setQuery(e.target.value)} /></label>
+      <label className="search"><Search size={16} /><input type="search" aria-label="Search requests" placeholder="Search requests" value={query} onChange={e => setQuery(e.target.value)} /></label>
       <div className="filter-row">
         <select aria-label="Filter by status" value={status} onChange={e => setStatus(e.target.value)}>{['Open requests', 'All statuses', ...INQUIRY_STATUSES].map(s => <option key={s}>{s}</option>)}</select>
-        <select aria-label="Filter by assigned owner" value={assignee} onChange={e => setAssignee(e.target.value)}>{['Anyone', 'Unassigned', ...assignees].map(s => <option key={s}>{s}</option>)}</select>
+        <select aria-label="Filter by assigned owner" value={assignee} onChange={e => setAssignee(e.target.value)}>{['Anyone', 'Unassigned', ...(wf.data?.owners ?? [])].map(s => <option key={s}>{s}</option>)}</select>
       </div>
     </div>
-    <p className="muted result-count" aria-live="polite">{visible.length} of {inquiries.length} requests</p>
-    {visible.length ? <div className="opportunity-grid">{visible.map(i => <section className="panel opportunity-card inquiry-card" key={i.id} aria-labelledby={`inq-${i.id}`}>
-      <div className="panel-heading"><span className="category">{i.kind}</span><StatusBadge status={i.status} /></div>
-      <h2 id={`inq-${i.id}`}>{i.organization || i.name}</h2>
-      <p>{i.name} · {i.email}</p>
-      <p className="muted">{i.sector} · Received {formatDate(i.createdAt)}</p>
-      <p className="inquiry-scope">{i.scope}</p>
-      <div className="opportunity-meta"><span>Assigned<strong>{i.assignee || 'Unassigned'}</strong></span><span>Next action<strong>{i.nextAction || 'None scheduled'}</strong></span></div>
-      <DueChip due={i.nextActionDue} today={today} />
-      <div className="card-buttons">
-        <button className="button secondary" onClick={() => onReview(i.id)}>Review request <ArrowUpRight size={14} /></button>
-        {i.status === 'Qualified' && !i.opportunityId && <button className="button primary" onClick={() => onConvert(i.id)}>Convert to opportunity</button>}
-        {i.opportunityId && <button className="text-button" onClick={() => onOpenOpportunity(i.opportunityId!)}>Open opportunity</button>}
-      </div>
-    </section>)}</div> : <section className="panel large-empty"><h2>No requests match these filters.</h2><button className="button secondary" onClick={() => { setQuery(''); setStatus('All statuses'); setAssignee('Anyone'); }}>Clear filters</button></section>}
+    <ListGate list={list} noun="requests" empty={empty} filtered={filtered} onClear={() => { setQuery(''); setStatus('All statuses'); setAssignee('Anyone'); }}>
+      <div className="opportunity-grid">{inquiries.map(i => <section className="panel opportunity-card inquiry-card" key={i.id} aria-labelledby={`inq-${i.id}`}>
+        <div className="panel-heading"><span className="category">{i.kind}</span><StatusBadge status={i.status} /></div>
+        <h2 id={`inq-${i.id}`}>{i.organization || i.name}</h2>
+        <p>{i.name} · {i.email}</p>
+        <p className="muted">{i.sector} · Received {formatDate(i.createdAt)}</p>
+        <p className="inquiry-scope">{i.scope}</p>
+        <div className="opportunity-meta"><span>Assigned<strong>{i.assignee || 'Unassigned'}</strong></span><span>Next action<strong>{i.nextAction || 'None scheduled'}</strong></span></div>
+        <DueChip due={i.nextActionDue} today={today} />
+        <div className="card-buttons">
+          <button className="button secondary" onClick={() => onReview(i.id)}>Review request <ArrowUpRight size={14} /></button>
+          {i.status === 'Qualified' && !i.opportunityId && <button className="button primary" onClick={() => onConvert(i.id)}>Convert to opportunity</button>}
+          {i.opportunityId && <button className="text-button" onClick={() => onOpenOpportunity(i.opportunityId!)}>Open opportunity</button>}
+        </div>
+      </section>)}</div>
+    </ListGate>
+    {list.state !== 'loading' && (list.items.length > 0 || filtered) && <ListFooter list={list} noun="requests" />}
   </>;
 }
 
@@ -164,7 +116,7 @@ export function InquiryDialog({ wf, inquiry, onClose, onConvert, onOpenOpportuni
   const set = (k: keyof typeof form) => (v: string) => { setForm(f => ({ ...f, [k]: v })); setSaved(''); };
   const statusChanged = form.status !== base.status;
   const needsReason = statusChanged && REASON_REQUIRED.includes(form.status as InquiryStatus);
-  const history = (wf.data?.activity ?? []).filter(a => a.subjectType === 'inquiry' && a.subjectId === inquiry.id).slice(0, 8);
+  const history = useRecordContext(wf, 'inquiry', inquiry.id).activity.slice(0, 8);
   async function submit(e: React.FormEvent, extra?: Record<string, unknown>) {
     e.preventDefault();
     const changes: Record<string, unknown> = {};
@@ -267,28 +219,40 @@ export function ConvertDialog({ wf, inquiry, onClose, onOpenOpportunity }: { wf:
 
 // ── Follow-ups ──────────────────────────────────────────────────────────────
 
+type Bucket = { items: FollowUpItem[]; total: number };
+type FollowUpBuckets = { overdue: Bucket; dueToday: Bucket; unassigned: Bucket; awaitingConversion: Bucket; opportunitiesNeedingAction: Bucket };
 export function FollowUpsView({ wf, onOpenInquiry, onOpenOpportunity, onConvert }: { wf: Workflow; onOpenInquiry: (id: string) => void; onOpenOpportunity: (id: string) => void; onConvert: (id: string) => void }) {
   const [show, setShow] = useState('Everything'), [owner, setOwner] = useState('Anyone'), [notice, setNotice] = useState(''), [error, setError] = useState('');
+  const [queue, setQueue] = useState<FollowUpBuckets | null>(null), [loadError, setLoadError] = useState('');
   const data = wf.data;
-  const queue = useMemo(() => data ? followUpQueue(data.inquiries, data.opportunities, data.today) : null, [data]);
-  if (wf.state === 'loading' || wf.state === 'idle') return <section className="panel large-empty" aria-busy="true"><p className="muted">Loading follow-ups…</p></section>;
-  if (wf.state === 'error' || !data || !queue) return <section className="panel large-empty"><Alert message={wf.error || 'Follow-ups could not be loaded.'} /><button className="button secondary" onClick={() => void wf.reload()}><RefreshCw size={14} />Retry</button></section>;
-  const owners = [...new Set([...data.inquiries.map(i => i.assignee), ...data.opportunities.map(o => o.owner)].filter(Boolean))].sort();
-  const keep = (item: FollowUpItem) => (show === 'Everything' || (show === 'Requests' ? item.kind === 'inquiry' : item.kind === 'opportunity'))
-    && (owner === 'Anyone' || (owner === 'Unassigned' ? !item.assignee : item.assignee === owner));
-  const sections: [string, string, FollowUpItem[], string][] = [
+  const { call, revision } = wf;
+  const seq = useRef(0);
+  const [attempt, setAttempt] = useState(0);
+  const params = new URLSearchParams({ kind: show === 'Requests' ? 'inquiry' : show === 'Opportunities' ? 'opportunity' : 'all', ...(owner === 'Anyone' ? {} : { owner: owner === 'Unassigned' ? 'none' : owner }) }).toString();
+  useEffect(() => {
+    const mine = ++seq.current;
+    void call<FollowUpBuckets>(`/api/followups?${params}`).then(r => {
+      if (mine !== seq.current) return; // a newer filter selection superseded this response
+      if (r.ok) { setQueue(r.data); setLoadError(''); } else setLoadError(r.error);
+    });
+  }, [call, params, revision, attempt]);
+  const load = () => setAttempt(a => a + 1);
+  if (wf.state === 'loading' || wf.state === 'idle' || (!queue && !loadError)) return <section className="panel large-empty" aria-busy="true"><p className="muted">Loading follow-ups…</p></section>;
+  if (wf.state === 'error' || !data || !queue) return <section className="panel large-empty"><Alert message={loadError || wf.error || 'Follow-ups could not be loaded.'} /><button className="button secondary" onClick={() => { void wf.reload(); void load(); }}><RefreshCw size={14} />Retry</button></section>;
+  const owners = data.owners;
+  const sections: [string, string, Bucket, string][] = [
     ['overdue', 'Overdue follow-ups', queue.overdue, 'Nothing is overdue.'],
     ['today', 'Due today', queue.dueToday, 'Nothing is due today.'],
     ['unassigned', 'Unassigned requests', queue.unassigned, 'Every open request has an owner.'],
     ['convert', 'Qualified — ready to convert', queue.awaitingConversion, 'No qualified requests are waiting.'],
     ['opportunities', 'Opportunities needing a next action', queue.opportunitiesNeedingAction, 'Every open opportunity has a current next action.'],
   ];
-  const unread = data.notifications.filter(n => !n.readAt);
+  const unread = data.notifications;
   async function complete(item: FollowUpItem) {
     setNotice(''); setError('');
     if (item.kind === 'inquiry') {
-      const inquiry = data!.inquiries.find(i => i.id === item.id);
-      if (!inquiry) return;
+      const inquiry = await wf.fetchRecord('inquiry', item.id) as unknown as InquiryRecord | null;
+      if (!inquiry) { setError('This request could not be loaded. Refresh and try again.'); return; }
       const r = await wf.patchInquiry(inquiry, { nextAction: '', nextActionDue: null });
       if (r.ok) setNotice(`Follow-up completed for ${item.title}.`); else setError(r.error);
     } else onOpenOpportunity(item.id);
@@ -304,15 +268,16 @@ export function FollowUpsView({ wf, onOpenInquiry, onOpenOpportunity, onConvert 
       <button className="button secondary" onClick={() => void wf.reload()}><RefreshCw size={14} />Refresh</button>
     </div>
     <div aria-live="polite">{notice && <p className="success-line"><Check size={13} />{notice}</p>}</div>
-    <Alert message={error} />
+    <Alert message={error || loadError} />
     </div>
     {unread.length > 0 && <section className="panel followup-section" aria-labelledby="fu-new">
-      <div className="panel-heading"><h2 id="fu-new"><BellRing size={16} aria-hidden="true" /> New requests <span className="nav-count">{unread.length}</span></h2><button className="text-button" onClick={() => void wf.markRead({ all: true })}>Mark all as read</button></div>
+      <div className="panel-heading"><h2 id="fu-new"><BellRing size={16} aria-hidden="true" /> New requests <span className="nav-count">{data.unreadNotifications}</span></h2><button className="text-button" onClick={() => void wf.markRead({ all: true })}>Mark all as read</button></div>
       <ul className="followup-list">{unread.map(n => <li key={n.id}><div><strong>{n.title}</strong><small>{new Date(n.createdAt).toLocaleString()} · in-app only (email {n.emailStatus})</small></div>
         <div className="row-actions">{n.subjectId && <button className="button secondary" onClick={() => { void wf.markRead({ ids: [n.id] }); onOpenInquiry(n.subjectId!); }}>Review</button>}</div></li>)}</ul>
+      {data.unreadNotifications > unread.length && <p className="muted empty-row">Showing the newest {unread.length} of {data.unreadNotifications} unread notifications.</p>}
     </section>}
-    {sections.map(([key, title, items, empty]) => { const list = items.filter(keep); return <section className="panel followup-section" key={key} aria-labelledby={`fu-${key}`}>
-      <div className="panel-heading"><h2 id={`fu-${key}`}>{title} <span className="nav-count">{list.length}</span></h2></div>
+    {sections.map(([key, title, bucket, empty]) => { const list = bucket.items; return <section className="panel followup-section" key={key} aria-labelledby={`fu-${key}`}>
+      <div className="panel-heading"><h2 id={`fu-${key}`}>{title} <span className="nav-count">{bucket.total}</span></h2></div>
       {list.length ? <ul className="followup-list">{list.map(item => <li key={item.kind + item.id}>
         <div><strong>{item.title}</strong><small>{item.kind === 'inquiry' ? 'Request' : 'Opportunity'} · {item.status} · {item.assignee || 'Unassigned'}</small>{item.nextAction && <span className="followup-action">{item.nextAction}</span>}<DueChip due={item.due} today={data.today} /></div>
         <div className="row-actions">
@@ -320,14 +285,20 @@ export function FollowUpsView({ wf, onOpenInquiry, onOpenOpportunity, onConvert 
             : <button className="button secondary" onClick={() => (item.kind === 'inquiry' ? onOpenInquiry(item.id) : onOpenOpportunity(item.id))}>Open</button>}
           {item.nextAction && item.kind === 'inquiry' && <button className="text-button" onClick={() => void complete(item)}><Check size={13} />Done</button>}
         </div></li>)}</ul> : <p className="muted empty-row">{empty}</p>}
+      {bucket.total > list.length && <p className="muted empty-row">Showing the first {list.length} of {bucket.total}. Use the filters above, or the Client requests and Opportunities views, to see the rest.</p>}
     </section>; })}
     <section className="panel followup-section" aria-labelledby="fu-activity"><div className="panel-heading"><h2 id="fu-activity">Recent activity</h2></div><ActivityList items={data.activity.slice(0, 15)} empty="No activity recorded yet." /></section>
   </div>;
 }
 
-/** Count shown in navigation: overdue plus due-today follow-ups. */
-export function followUpCount(data: WorkflowSnapshot | null) {
-  if (!data) return 0;
-  const q = followUpQueue(data.inquiries, data.opportunities, data.today);
-  return q.overdue.length + q.dueToday.length;
+/** Count shown in navigation: overdue plus due-today follow-ups (computed on the server). */
+export function followUpCount(data: Summary | null) {
+  return data?.followUpsDue ?? 0;
+}
+
+/** Renders children once the inquiry is in the cache (fetching it by id when needed). */
+export function WithInquiry({ wf, id, children }: { wf: Workflow; id: string; children: (inquiry: InquiryRecord) => React.ReactNode }) {
+  const inquiry = wf.data?.inquiries.find(i => i.id === id);
+  useEnsureRecords(wf, 'inquiry', [id]);
+  return inquiry ? <>{children(inquiry)}</> : null;
 }

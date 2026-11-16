@@ -1,11 +1,14 @@
 'use client';
 // Award → project conversion and delivery planning UI.
 import { useState, type ReactNode } from 'react';
-import { ArrowLeft, BriefcaseBusiness, Plus, Trash2 } from 'lucide-react';
+import { ArrowLeft, BriefcaseBusiness, Plus, Search, Trash2 } from 'lucide-react';
 import { SPECS, PROJECT_TRANSITIONS, reasonRequired, type Sections, type Values } from '../../lib/records';
 import type { OpportunityRecord } from '../../lib/workflow';
 import { Alert, DueChip, StatusBadge, type Workflow } from './workflow';
 import { EvidenceLinks, RecordDialog, recs, saver, Tabs, type PursuitTab } from './records-ui';
+import { usePagedList, useRecordContext } from './data';
+import { ListFooter, ListGate, RefPicker } from './list-ui';
+import { RefreshCw } from 'lucide-react';
 import { Dialog } from './pursuit-ui';
 import { DeliverablesPanel } from './delivery-ui';
 
@@ -30,7 +33,6 @@ function CreateProjectDialog({ wf, opportunity, submission, onClose, onCreated }
   const version = recs(wf, 'proposalVersion').find(v => v.id === submission.proposalVersionId);
   const sections = (version?.sections ?? {}) as Sections;
   const proposedScope = ['understanding', 'approach', 'deliverables'].map(k => sections[k]?.body?.trim()).filter(Boolean).join('\n\n');
-  const orgs = recs(wf, 'organization').filter(o => o.status === 'Active');
   const [form, setForm] = useState({ title: opportunity.title, clientOrganizationId: opportunity.organizationId ?? '', owner: opportunity.owner, startDate: str(submission.outcomeDate), plannedEndDate: '', scope: proposedScope || '', confirm: false });
   const [deliverables, setDeliverables] = useState<{ title: string; dueDate: string; required: boolean }[]>([{ title: '', dueDate: '', required: true }]);
   const [error, setError] = useState(''), [busy, setBusy] = useState(false);
@@ -44,7 +46,7 @@ function CreateProjectDialog({ wf, opportunity, submission, onClose, onCreated }
     <p className="muted">Check the client, scope, owner, dates and initial deliverables. The scope becomes baseline 1; later changes need an approved change request.{version ? ` Prefilled from approved proposal version ${str(version.number)}.` : ''}</p>
     <div className="form-grid">
       <label className="field wide"><span>Project title *</span><input required maxLength={200} value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} /></label>
-      <label className="field"><span>Client organization</span><select value={form.clientOrganizationId} onChange={e => setForm({ ...form, clientOrganizationId: e.target.value })}><option value="">Not linked</option>{orgs.map(o => <option key={str(o.id)} value={str(o.id)}>{str(o.name)}</option>)}</select></label>
+      <RefPicker wf={wf} type="organization" label="Client organization" placeholder="Not linked" value={form.clientOrganizationId || null} onChange={id => setForm({ ...form, clientOrganizationId: id ?? '' })} filters={{ status: 'Active' }} />
       <label className="field"><span>Project owner</span><input maxLength={120} value={form.owner} onChange={e => setForm({ ...form, owner: e.target.value })} /></label>
       <label className="field"><span>Start date</span><input type="date" value={form.startDate} onChange={e => setForm({ ...form, startDate: e.target.value })} /></label>
       <label className="field"><span>Planned completion</span><input type="date" value={form.plannedEndDate} onChange={e => setForm({ ...form, plannedEndDate: e.target.value })} /></label>
@@ -72,22 +74,21 @@ export const awardTab = (wf: Workflow, onOpenProject: (id: string) => void) => (
 // ── Projects list and project workspace ─────────────────────────────────────
 
 export function ProjectsView({ wf, onOpen }: { wf: Workflow; onOpen: (id: string) => void }) {
-  const [status, setStatus] = useState('Open projects');
-  if (wf.state !== 'ready') return <section className="panel large-empty" aria-busy="true"><p className="muted">Loading projects…</p></section>;
-  const projects = recs(wf, 'project');
-  const visible = projects.filter(p => status === 'All' || (status === 'Open projects' ? !['Closed', 'Cancelled'].includes(str(p.status)) : p.status === status));
-  const orgName = (id: unknown) => str(recs(wf, 'organization').find(o => o.id === id)?.name) || 'Client not linked';
+  const [status, setStatus] = useState('Open projects'), [query, setQuery] = useState('');
+  const list = usePagedList(wf, 'project', { q: query, filters: status === 'All' ? {} : status === 'Open projects' ? { open: 'true' } : { status } });
+  const filtered = status !== 'Open projects' || Boolean(query.trim());
   return <>
-    <div className="table-tools workflow-tools"><div className="filter-row"><select aria-label="Filter projects by status" value={status} onChange={e => setStatus(e.target.value)}>{['Open projects', 'All', 'Planning', 'Active', 'On hold', 'Closing', 'Closed', 'Cancelled'].map(s => <option key={s}>{s}</option>)}</select></div></div>
-    {!projects.length ? <section className="panel large-empty"><BriefcaseBusiness size={28} /><h2>No projects yet.</h2><p>Projects are created from a confirmed award on an opportunity’s Project tab.</p></section>
-      : <div className="opportunity-grid">{visible.map(p => {
-        const ms = recs(wf, 'milestone').filter(m => m.projectId === p.id), ds = recs(wf, 'deliverable').filter(d => d.projectId === p.id);
-        return <section className="panel opportunity-card" key={str(p.id)} aria-labelledby={`prj-${str(p.id)}`}>
-          <div className="panel-heading"><span className="category">{orgName(p.clientOrganizationId)}</span><StatusBadge status={str(p.status)} /></div>
-          <h2 id={`prj-${str(p.id)}`}>{str(p.title)}</h2>
-          <div className="opportunity-meta"><span>Milestones<strong>{ms.filter(m => m.status === 'Complete').length} / {ms.length}</strong></span><span>Deliverables accepted<strong>{ds.filter(d => d.acceptedVersionId).length} / {ds.length}</strong></span><span>Planned end<strong>{str(p.plannedEndDate) || 'Not set'}</strong></span></div>
-          <div className="card-buttons"><button className="button primary" onClick={() => onOpen(str(p.id))}>Open project</button></div>
-        </section>; })}</div>}
+    <div className="table-tools workflow-tools"><label className="search"><Search size={16} /><input type="search" aria-label="Search projects" placeholder="Search projects" value={query} onChange={e => setQuery(e.target.value)} /></label><div className="filter-row"><select aria-label="Filter projects by status" value={status} onChange={e => setStatus(e.target.value)}>{['Open projects', 'All', 'Planning', 'Active', 'On hold', 'Closing', 'Closed', 'Cancelled'].map(s => <option key={s}>{s}</option>)}</select></div></div>
+    <ListGate list={list} noun="projects" filtered={filtered} onClear={() => { setStatus('All'); setQuery(''); }}
+      empty={<section className="panel large-empty"><BriefcaseBusiness size={28} /><h2>No projects yet.</h2><p>Projects are created from a confirmed award on an opportunity’s Project tab.</p></section>}>
+      <div className="opportunity-grid">{list.items.map(p => <section className="panel opportunity-card" key={str(p.id)} aria-labelledby={`prj-${str(p.id)}`}>
+        <div className="panel-heading"><span className="category">{str(p._clientName) || 'Client not linked'}</span><StatusBadge status={str(p.status)} /></div>
+        <h2 id={`prj-${str(p.id)}`}>{str(p.title)}</h2>
+        <div className="opportunity-meta"><span>Milestones<strong>{Number(p._milestonesComplete ?? 0)} / {Number(p._milestones ?? 0)}</strong></span><span>Deliverables accepted<strong>{Number(p._deliverablesAccepted ?? 0)} / {Number(p._deliverables ?? 0)}</strong></span><span>Planned end<strong>{str(p.plannedEndDate) || 'Not set'}</strong></span></div>
+        <div className="card-buttons"><button className="button primary" onClick={() => onOpen(str(p.id))}>Open project</button></div>
+      </section>)}</div>
+    </ListGate>
+    {list.state !== 'loading' && (list.items.length > 0 || filtered) && <ListFooter list={list} noun="projects" />}
   </>;
 }
 
@@ -111,15 +112,20 @@ function RecordList({ wf, type, projectId, empty, render, refOptions = {}, title
   return <>
     <div className="section-toolbar"><span /><button className="button primary" onClick={() => setDialog({})}><Plus size={14} />Add {SPECS[type].label.toLowerCase()}</button></div>
     {items.length ? <ul className="followup-list">{items.map(r => <li key={str(r.id)}><div>{render(r)}</div><div className="row-actions"><button className="button secondary" onClick={() => setDialog({ record: r })}>Edit</button></div></li>)}</ul> : <p className="muted empty-row">{empty}</p>}
-    {dialog && <RecordDialog spec={SPECS[type]} record={dialog.record} fixed={dialog.record ? {} : { projectId }} hide={['projectId']} title={dialog.record ? `Edit ${SPECS[type].label.toLowerCase()}` : `Add ${SPECS[type].label.toLowerCase()}`} eyebrow={title.toUpperCase()} refOptions={refOptions}
+    {dialog && <RecordDialog wf={wf} spec={SPECS[type]} record={dialog.record} fixed={dialog.record ? {} : { projectId }} hide={['projectId']} title={dialog.record ? `Edit ${SPECS[type].label.toLowerCase()}` : `Add ${SPECS[type].label.toLowerCase()}`} eyebrow={title.toUpperCase()} refOptions={refOptions}
       onClose={() => setDialog(null)} onSave={v => saver(dialog.record ? wf.updateRecord(type, dialog.record, v) : wf.createRecord(type, v))} />}
   </>;
 }
 
 export function ProjectView({ wf, projectId, onBack, onOpenPursuit, extraTabs = () => [] }: { wf: Workflow; projectId: string; onBack: () => void; onOpenPursuit: (opportunityId: string) => void; extraTabs?: (p: Values) => PursuitTab[] }) {
   const [editing, setEditing] = useState(false);
+  const ctx = useRecordContext(wf, 'project', projectId);
   const project = recs(wf, 'project').find(p => p.id === projectId);
-  if (!project) return <section className="panel large-empty" aria-busy="true"><p className="muted">Loading project…</p></section>;
+  if (!project || ctx.state === 'loading') {
+    if (ctx.state === 'missing') return <section className="panel large-empty"><h2>Project not found.</h2><button className="button secondary" onClick={onBack}><ArrowLeft size={14} />All projects</button></section>;
+    if (ctx.state === 'error') return <section className="panel large-empty"><Alert message={ctx.error} /><button className="button secondary" onClick={() => void ctx.retry()}><RefreshCw size={14} />Retry</button></section>;
+    return <section className="panel large-empty" aria-busy="true"><p className="muted">Loading project…</p></section>;
+  }
   const today = wf.data?.today ?? '';
   const pid = str(project.id), title = str(project.title);
   const milestones = recs(wf, 'milestone').filter(m => m.projectId === pid);
@@ -149,6 +155,6 @@ export function ProjectView({ wf, projectId, onBack, onOpenPursuit, extraTabs = 
         render={l => <><strong>{str(l.kind)}: {str(l.title)}</strong><small>{str(l.owner) || 'No owner'} · severity {str(l.severity)}</small><span className="chip-row"><StatusBadge status={str(l.status)} />{['Open', 'Monitoring'].includes(str(l.status)) ? <DueChip due={(l.dueDate as string | null) ?? null} today={today} /> : null}</span>{l.resolution ? <small>Resolution: {str(l.resolution)}</small> : null}</>} /></section> },
       ...extraTabs(project),
     ]} />
-    {editing && <RecordDialog spec={SPECS.project} record={project} title="Edit project details" refOptions={{ organization: recs(wf, 'organization').filter(o => o.status === 'Active').map(o => ({ id: str(o.id), label: str(o.name) })) }} onClose={() => setEditing(false)} onSave={v => saver(wf.updateRecord('project', project, v))} />}
+    {editing && <RecordDialog wf={wf} spec={SPECS.project} record={project} title="Edit project details" onClose={() => setEditing(false)} onSave={v => saver(wf.updateRecord('project', project, v))} />}
   </div>;
 }

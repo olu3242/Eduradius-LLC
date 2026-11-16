@@ -56,3 +56,7 @@
 .closeout-form{display:grid;gap:12px}
 .report-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}.report-count{font-size:22px;font-weight:600;color:var(--green)}.report-source{display:block;margin-top:4px;font-size:10px}
 @media(max-width:920px){.report-grid{grid-template-columns:1fr}}
+/* Server-paginated lists and bounded reference pickers */
+.list-footer{display:flex;flex-direction:column;align-items:center;gap:10px;padding:18px 0 4px}.list-footer .result-count{margin:0;outline:none}.list-error{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:center}.load-more{min-width:180px}
+.ref-picker .ref-search{padding:8px 10px;font-size:11px}.ref-picker>.field-hint{margin-top:0}.filter-row .ref-picker{margin-bottom:0;min-width:220px;flex:1}
+@media(max-width:700px){.filter-row .ref-picker{min-width:0;width:100%}.load-more{width:100%}}

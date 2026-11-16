@@ -72,7 +72,8 @@ test('built Worker: public intake, token session, conversion, persistence and bo
     const stored = await (await owner()).json();
     assert.ok(!('inquiries' in (stored.data ?? {})), 'inquiries are not copied into the workspace document');
     const json = (path, init = {}) => fetch(app.base + path, { ...init, headers: { cookie, 'content-type': 'application/json', ...(init.headers ?? {}) } });
-    let flow = await (await json('/api/workflow')).json();
+    const full = async () => ({ ...(await (await json('/api/workflow')).json()), ...(await (await json('/api/export')).json()).workflow });
+    let flow = await full();
     let lead = flow.inquiries[0];
     assert.equal(lead.scope, 'Local persistence check'); assert.equal(lead.status, 'New');
     assert.equal(flow.notifications[0].emailStatus, 'disabled');
@@ -83,7 +84,9 @@ test('built Worker: public intake, token session, conversion, persistence and bo
     const convert = () => json(`/api/inquiries/${lead.id}/convert`, { method: 'POST', body: JSON.stringify({ version: lead.version, opportunity: draft }) });
     const [first, second] = await Promise.all([convert(), convert()]);
     assert.deepEqual([first.status, second.status].sort(), [200, 201], 'one conversion succeeds; the concurrent duplicate returns the existing record');
-    flow = await (await json('/api/workflow')).json();
+    flow = await full();
+    const firstPage = await (await json('/api/records/inquiry?limit=1')).json();
+    assert.equal(firstPage.items.length, 1); assert.equal(firstPage.page.total, 1, 'paginated list served by the built Worker');
     assert.equal(flow.opportunities.filter(o => o.sourceInquiryId === lead.id).length, 1);
     assert.equal(flow.inquiries[0].status, 'Converted');
     assert.ok(flow.activity.some(a => a.type === 'inquiry.converted' && a.actor === 'token:session'));

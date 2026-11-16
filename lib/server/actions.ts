@@ -3,7 +3,7 @@
 import { SPECS, EVIDENCE_SUBJECTS, PROJECT_TRANSITIONS, ACCEPTANCE_KINDS, closeoutChecklist, reasonRequired, SECTION_BASIS, SUBMISSION_METHODS, SUBMISSION_OUTCOMES, emptySections, evidenceState, organizationKey, emailKey, websiteDomain, validateSections, type Sections, type Values } from '../records';
 import { businessDate, isIsoDate } from '../workflow';
 import { activityStatement, type StoreResult } from './workflow-store';
-import { db, nowIso, getRecord, listRecords, listAllRecords, recordExists, tableFor, activity, conflict, insertStatement } from './records-store';
+import { db, nowIso, getRecord, getRecords, listByField, recordExists, tableFor, activity, conflict, insertStatement } from './records-store';
 
 type Body = Record<string, unknown>;
 export type Action = (body: Body, actor: string) => Promise<StoreResult<unknown>>;
@@ -448,8 +448,13 @@ async function closeoutProject(body: Body, actor: string): Promise<StoreResult<u
   const actualEndDate = body.actualEndDate ? str(body.actualEndDate) : businessDate();
   if (!isIsoDate(actualEndDate)) return bad('Actual completion date must be valid.');
   const finalAcceptanceEvidenceId = body.finalAcceptanceEvidenceId ? str(body.finalAcceptanceEvidenceId) : null;
-  const { records } = await listAllRecords();
-  const checklist = closeoutChecklist(String(project.id), records, { finalAcceptanceEvidenceId, lessonsLearned, archiveReviewed: body.archiveReviewed === true }, businessDate());
+  const pid = String(project.id);
+  const records = {
+    project: [project], deliverable: await listByField('deliverable', 'projectId', [pid], 5000), projectLog: await listByField('projectLog', 'projectId', [pid], 5000),
+    milestone: await listByField('milestone', 'projectId', [pid], 5000), changeRequest: await listByField('changeRequest', 'projectId', [pid], 5000),
+    evidence: await getRecords('evidence', [finalAcceptanceEvidenceId]),
+  };
+  const checklist = closeoutChecklist(pid, records, { finalAcceptanceEvidenceId, lessonsLearned, archiveReviewed: body.archiveReviewed === true }, businessDate());
   const failing = checklist.filter(c => !c.passed);
   if (failing.length && !exceptionReason) return { status: 409, body: { error: `Closeout is blocked: ${failing.map(c => c.label.toLowerCase()).join('; ')}. Resolve these or record an owner exception with a reason.`, checklist } as never };
   const id = crypto.randomUUID(), at = nowIso(), requestId = crypto.randomUUID();
@@ -472,10 +477,11 @@ async function createExperience(body: Body, actor: string): Promise<StoreResult<
   if (!project) return bad('Project not found.', 404);
   const existing = await db().prepare('SELECT id FROM experience_records WHERE project_id = ?').bind(project.id).first<Row>();
   if (existing) return { status: 200, body: { record: await getRecord('experience', String(existing.id)), alreadyCreated: true } };
-  const closeout = latestCloseout(await listRecords('closeout'), String(project.id));
+  const closeout = latestCloseout(await listByField('closeout', 'projectId', [project.id], 5000), String(project.id));
   if (project.status !== 'Closed' || !closeout || closeout.outcome !== 'Completed') return bad('Experience records come only from projects closed as completed (not cancelled).', 409);
-  const versions = await listRecords('deliverableVersion');
-  const verified = (await listRecords('deliverable')).filter(d => d.projectId === project.id && d.acceptedVersionId).map(d => {
+  const accepted = (await listByField('deliverable', 'projectId', [project.id], 5000)).filter(d => d.acceptedVersionId);
+  const versions = await getRecords('deliverableVersion', accepted.map(d => d.acceptedVersionId));
+  const verified = accepted.map(d => {
     const v = versions.find(x => x.id === d.acceptedVersionId);
     return { deliverableId: d.id, title: d.title, versionId: d.acceptedVersionId, versionNumber: v?.number ?? null, acceptanceKind: v?.acceptanceKind ?? '', acceptanceEvidenceId: v?.acceptanceEvidenceId ?? null };
   });
@@ -505,7 +511,7 @@ async function reviewExperience(body: Body, actor: string): Promise<StoreResult<
   if (to === 'Approved for capability statement') {
     const today = businessDate();
     const project = await getRecord('project', String(exp.projectId));
-    const closeout = latestCloseout(await listRecords('closeout'), String(exp.projectId));
+    const closeout = latestCloseout(await listByField('closeout', 'projectId', [exp.projectId], 5000), String(exp.projectId));
     const verified = (exp.verifiedDeliverables as Values[]) ?? [];
     const outcomeEvidence = (await db().prepare("SELECT e.* FROM evidence e JOIN evidence_links l ON l.evidence_id = e.id WHERE l.subject_type = 'experience' AND l.subject_id = ?").bind(exp.id).all<Row>()).results;
     const currentOutcomeEvidence = outcomeEvidence.filter(e => evidenceState({ reviewStatus: e.review_status, reviewDate: e.review_date }, today) === 'current');

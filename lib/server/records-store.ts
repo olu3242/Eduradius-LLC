@@ -31,10 +31,26 @@ export async function getRecord(type: string, id: string): Promise<Values | null
   const row = await db().prepare(`SELECT * FROM ${spec.table} WHERE id = ?`).bind(id).first<Row>();
   return row ? toRecord(spec, row) : null;
 }
+/** Every row of a type. Only for exports and tests; request paths use the scoped readers below. */
 export async function listRecords(type: string): Promise<Values[]> {
   const spec = SPECS[type];
   return (await db().prepare(`SELECT * FROM ${spec.table} ORDER BY created_at, rowid`).all<Row>()).results.map(r => toRecord(spec, r));
 }
+/** Records whose `key` field is one of `values` (parent-scoped reads), oldest first, bounded. */
+export async function listByField(type: string, key: string, values: unknown[], limit = 500): Promise<Values[]> {
+  const spec = SPECS[type], column = key === 'id' ? 'id' : spec.fields.find(f => f.key === key)?.column;
+  if (!column) throw new Error(`Unknown field ${type}.${key}`);
+  const ids = [...new Set(values.filter(v => typeof v === 'string' && v))] as string[];
+  if (!ids.length) return [];
+  const out: Values[] = [];
+  for (let i = 0; i < ids.length; i += 90) { // stay under D1's bound-parameter limit
+    const chunk = ids.slice(i, i + 90);
+    const rows = (await db().prepare(`SELECT * FROM ${spec.table} WHERE ${column} IN (${chunk.map(() => '?').join(', ')}) ORDER BY created_at, rowid LIMIT ?`).bind(...chunk, limit).all<Row>()).results;
+    out.push(...rows.map(r => toRecord(spec, r)));
+  }
+  return out.slice(0, limit);
+}
+export const getRecords = (type: string, ids: unknown[]) => listByField(type, 'id', ids, 1000);
 export async function recordExists(type: string, id: string) {
   const table = tableFor(type); if (!table) return false;
   return Boolean(await db().prepare(`SELECT 1 AS found FROM ${table} WHERE id = ?`).bind(id).first());
@@ -100,7 +116,7 @@ export const HOOKS: Record<string, Hook> = {
         if (v.status === 'Complete' && !sameValues(v, current, ['title', 'plannedDate', 'actualDate', 'completionCriteria', 'dependsOn'])) return 'This milestone is complete. Reopen it with a reason before changing completed work.';
         if (v.status !== 'Complete' && (!String(v.changeNote).trim() || v.changeNote === current.changeNote)) return 'Record the reason for reopening this completed milestone.';
       }
-      const siblings = (await listRecords('milestone')).filter(m => m.projectId === v.projectId);
+      const siblings = await listByField('milestone', 'projectId', [v.projectId], 5000);
       if (v.status === 'Complete') {
         if (!v.actualDate) return 'Record the actual completion date.';
         const open = (v.dependsOn as string[]).filter(id => siblings.find(m => m.id === id)?.status !== 'Complete');

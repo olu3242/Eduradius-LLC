@@ -1,7 +1,7 @@
 // Shared HTTP helpers for API routes. Server-only.
 import { currentRequestId } from './request-context';
 
-const baseHeaders = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
+export const baseHeaders = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
 
 export function json(body: unknown, status = 200, headers: Record<string, string> = {}) {
   return Response.json(body, { status, headers: { ...baseHeaders, ...headers } });
