@@ -2,166 +2,140 @@
 
 | | |
 | --- | --- |
-| Release candidate | **`af555c9e97bd097d02358782b4e6793c88d88560`** on `claude/focused-archimedes-t13ibf` (draft PR #1) |
-| Previous candidate | `36ce7a1a3de6cd9f06a26894383d7e3c6fb55ac8`. Its evidence is kept in the history section at the end and is not reused below |
-| Commits since `e07844b` | `55bb85c` dependencies · `f92557e` local datasets and measurement · `ff143a1` pagination · `af555c9` migration inspection and recovery |
+| Release candidate | **`6ba656ccabc2826a6f947cecdf669c62a77d000a`** on `claude/focused-archimedes-t13ibf` (draft PR #1) |
+| Candidate archive | `eduradius-6ba656ccabc2-dist.tar.gz`, SHA-256 **`bb6449e70eaf84371c4cc33ba3d60ad0b2bdc684199861e75740bb1d3563c022`** (clean-checkout build; manifest and handling in [STAGING_HANDOFF.md](STAGING_HANDOFF.md)) |
+| Code commits since `af555c9` | `f9b2eb5` browser-abort fix and diagnostics · `3000478` vinext/wrangler upgrade · `f2cac81` rollback conflicts (migration 0008) · `d48d0c4` preflight and staging safeguards · `0c7c724` test timing fix · `f301160` reproducible builds and candidate builder · `ae5e7fd`, `6ba656c` builder manifest and lint |
+| Commits after the candidate | Documentation (`5d2be8e` and later) and the browser-series runner `0b355ad` (`tests/browser/`, not deployed). `git diff 6ba656c..HEAD -- app lib worker db drizzle package.json pnpm-lock.yaml pnpm-workspace.yaml next.config.ts vite.config.ts scripts` is empty |
+| Earlier candidates | `af555c9` and `36ce7a1`. Their evidence is in the history sections and is not reused below |
 | Evidence date | 2026-11-16 (business date America/Chicago) |
-| Environment | Linux container, Node 22.23.4, pnpm 11.25.0 (corepack), Wrangler 4.92.0, Chromium via Playwright; isolated local D1 (Miniflare) only |
-
-The commit that adds this document changes only documentation. Every result below was produced against the candidate commit's code, unless a row names another commit.
+| Environment | Linux container, Node 22.23.4, pnpm 11.25.0, Wrangler 4.157.0 (Miniflare 5), vinext 1.4.4, Chromium via Playwright; local D1 only |
 
 ## Decisions
 
 | Decision | Outcome | Basis |
 | --- | --- | --- |
-| **Local readiness** | **Ready** | On the candidate: 115/115 unit and integration tests, 2/2 built-Worker smoke tests, 48/48 certification checks against the built Worker, and browser suites of 30, 27, 16 and 14 checks. Migration inspection, interrupted-migration resume, backup/restore with Wrangler's export, previous-release compatibility and the v5 rollback round trip are verified locally. |
-| **Isolated hosted staging readiness** | **Not certified (blocked)** | No explicitly authorized, isolated staging target, account or credential exists (K1). Tooling and runbook are rehearsed locally ([STAGING.md](STAGING.md)). |
-| **Production release readiness** | **Not recommended yet** | Requires hosted staging certification (K1), a confirmed backup/restore and migration-tracking procedure for the Sites-managed D1 (K2), and configured access variables with verified hosted sign-in (K3). The dependency blocker (K4) is resolved: production audit 0. This is a recommendation, not deployment authorization. |
+| **Local readiness** | **Ready** | See "Results" below for the candidate's checks. The contracting-journey abort was reproduced and fixed. The one remaining failed browser attempt was the intake rate limit refusing a sixth submission by design. |
+| **Isolated hosted staging readiness** | **Not certified (blocked)** | No explicitly authorized, isolated staging target, account or credential exists (K1). [STAGING_HANDOFF.md](STAGING_HANDOFF.md) is ready for route A (Cloudflare token mode) or route B (isolated Sites). |
+| **Production release readiness** | **Not recommended yet** | Requires certification on route B or an equivalent for the Sites-managed database: authentication (K3), backup/restore and migration tracking (K2). Route A alone does not certify Sites authentication. This is a recommendation, not deployment authorization. |
 
 ## What changed in this candidate
 
-1. **Dependencies ([DEPENDENCIES.md](DEPENDENCIES.md)).**
-   - The deployed Worker bundled React Server Components 19.2.6, which had a critical RCE advisory; the earlier triage had missed it.
-   - React, React DOM and `react-server-dom-webpack` are now 19.2.9, `next` and `eslint-config-next` 16.4.5, `vite` 8.1.6 and `zod` 4.6.7, with same-major overrides for patched transitive packages.
-   - `pnpm audit --prod`: 23 → **0**. `pnpm audit`: 86 → 4, all in development or build tooling.
-2. **Pagination ([API.md](API.md), [PERFORMANCE.md](PERFORMANCE.md)).**
-   - `/api/workflow` is now a bounded summary.
-   - Lists use keyset cursors with validated, allowlisted search, filters and sorts. Detail views load one context; reports aggregate on the server; the export is complete and consistent, or refused.
-   - Pickers search the server lazily. Server-side whole-table scans in actions were removed.
-   - Migration 0007 adds indexes.
-3. **Migrations and recovery ([OPERATIONS.md](OPERATIONS.md)).**
-   - `scripts/migration-status.mjs` inspects before anything is prescribed and resumes interrupted files.
-   - Fresh install and upgrade are now separate procedures.
-   - Backup/restore was verified with `wrangler d1 export`.
-   - The previous release was confirmed compatible with the new data.
-   - A code-only rollback to Site v5 after the import was shown to be unsafe, and was replaced by a tested legacy-document rebuild (`scripts/recovery/legacy-document.mjs`).
+1. **Browser reliability.**
+   - **Cause of the unexplained abort:** an aborted list request whose body was being read was reported as a success with an empty body. The cache merge then threw inside a React state update and unmounted the workspace.
+   - **Reproduction:** 3 of 5 clean-database runs on the pre-fix code, with traces.
+   - **Fix:** `call()` reports aborts and unreadable bodies as failures; lists ignore responses after unmount and validate their shape; a view-level error boundary contains a failing view.
+   - **Diagnostics for every run:** `tests/browser/diagnostics.mjs` (redacted `diag.json` plus a Playwright trace on failure) and `run-series.mjs` (bounded isolated runs; every attempt recorded with the server log and a classification).
+2. **Dependencies.**
+   - vinext 1.4.4 (React 19.3.1), wrangler 4.157.0 with `@cloudflare/vite-plugin` 1.68.0, drizzle-kit 0.31.11, and overrides for esbuild (drizzle-kit) and minimatch (lint).
+   - `pnpm audit` and `pnpm audit --prod`: **no known vulnerabilities** ([DEPENDENCIES.md](DEPENDENCIES.md)).
+3. **Recovery.**
+   - Rollback-window edits are no longer dropped silently. They become `import_conflicts` (migration **0008**) that the owner decides explicitly in Follow-ups: a reason is required, decisions are version-guarded, decided once, and recorded in activity.
+   - The v5 tool refuses incomplete exports, oversize documents and unconfirmed runs, and embeds fingerprints of every item handed over.
+   - The previous release is the preferred rollback.
+4. **Migration preflight.** `migration-status` now also refuses:
+   - malformed or failed inspections;
+   - an empty result without confirmation;
+   - objects that no migration creates;
+   - `d1_migrations` tracking that disagrees with the schema.
+5. **Staging safeguards.**
+   - `staging-config` requires the account id and an exact confirmation of the complete target, and refuses production and placeholder identifiers (`scripts/production-identity.json`).
+   - `staging-certify` requires `--expect-build` and creates no records unless liveness, the deployed build and readiness all pass.
+6. **Reproducible candidate.**
+   - `scripts/release/build-candidate.mjs` builds from a clean worktree with the frozen lockfile, checks the embedded and served identity and the absence of configuration or credentials, and writes a deterministic archive, SHA256SUMS and manifest.
+   - `next.config.ts` uses the commit as the build id.
+   - Builds are **not byte-identical**: vinext embeds per-build random keys. The archive is built once, deployed exactly as recorded, and stored privately.
 
-## Requirements-to-evidence matrix
-
-Status values: Implemented / Partially implemented / Missing / Blocked / Not verified. "Hosted" behavior is **Not verified** everywhere, because no staging environment exists.
-
-| Area | Status | Code | Automated evidence | Browser evidence | Remaining |
-| --- | --- | --- | --- | --- | --- |
-| Authentication and owner access | Implemented locally; hosted Not verified | `lib/server/access.ts`, `owner-route.ts` | access (34); every new read endpoint denies anonymous and wrong-token callers (pagination test); certify 48/48 | journey 30/30 | Hosted Sign in with ChatGPT and owner allowlist (K3) |
-| Public website and briefing submission | Implemented | `app/page.tsx`, `api/inquiries`, `api/site` | intake, limits, public projection tests | journey; contracting journey | — |
-| Inquiry review, follow-ups, conversion | Implemented | `lib/workflow.ts`, `workflow-store.ts`, `summary.ts` | workflow (20); follow-up buckets in SQL with totals (pagination) | journey 30/30 | — |
-| Organizations, contacts, teaming | Implemented | `records-store.ts`, `actions.ts`, `context.ts` | records (10); duplicate groups over the whole table | contracting journey | — |
-| Requirements and evidence | Partially implemented | specs; `evidence_links` | records; evidence state filters | contracting journey | **File uploads: Blocked** (no private storage) |
-| Proposals, submission, award, project | Implemented (owner review) | `actions.ts` | proposals (8), projects (5) | contracting journey 27/27 | Independent second reviewer: Missing by design |
-| Delivery, change control, closeout, experience | Implemented | `actions.ts` (parent-scoped reads) | delivery (8) | contracting journey | — |
-| **Pagination, search, filters, relationships** | **Implemented** | `listing.ts`, `data.ts`, `list-ui.tsx` | pagination (14): limits, invalid inputs, equal sort values, cursor binding, concurrent inserts/edits/deletes, search beyond page 1, LIKE escaping, every allowlisted sort/filter, relationships beyond page 1, indexes used | pagination-ui 16/16; volume 14/14 | Substring search (no full-text index) (K12) |
-| **Reports** | **Implemented (server-side)** | `report-store.ts` | every metric equals the shared definition over the full export | — | — |
-| **Exports** | **Implemented (complete or refused)** | `export.ts` | 2,100 opportunities exported (the old cap was 2,000); 413 on both limits; manifest counts | perf: complete vs database counts | Very large workspaces need a database backup instead |
-| Operations (health, logs, correlation) | Implemented | `health.ts`, `request-context.ts` | release (7) | contracting journey | Alerts prepared, not activated |
-| **Migrations and recovery** | **Implemented; hosted Not verified** | `drizzle/0000–0007`, `scripts/migration-status.mjs`, `scripts/recovery/` | recovery (5): status, partial/out-of-order, resume, no-0007 compatibility, interrupted import, v5 round trip; release (7) | manual: Wrangler export/restore, previous release on new data, original v5 handler | Sites-managed backup and migration tracking (K2) |
-| **Dependencies** | **Remediated** | `package.json`, `pnpm-workspace.yaml` | audit: prod 0; 4 dev/build advisories documented | journeys on upgraded deps (`55bb85c`) | vinext/wrangler upgrade (backlog) |
-
-## Automated results (candidate `af555c9`)
+## Results (candidate `6ba656c`, local)
 
 | Check | Result |
 | --- | --- |
-| `pnpm install --frozen-lockfile` | pass |
-| `pnpm exec tsc --noEmit` | pass |
-| `pnpm lint` | pass: 0 errors, the same 13 `<img>` warnings |
-| `pnpm test` | **115/115**: access 34, workflow 20, pagination 14, records 10, proposals 8, delivery 8, release 7, projects 5, recovery 5, preflight 4 |
-| `pnpm build` | pass; build identity `af555c9e97bd` embedded |
-| `pnpm test:worker` | **2/2** (built Worker, every migration, paginated list) |
-| `scripts/staging-certify.mjs` against the built Worker (fresh 0000–0007 database, token mode) | **48/48**; reported build `af555c9e97bd` matched; token and synthetic email absent from output and Worker log |
-| `wrangler deploy --dry-run` with a generated staging config | pass: 1,185.38 KiB (329.46 KiB gzipped); bindings `DB`, `WORKSPACE_AUTH_MODE` |
-| `pnpm audit --prod` | **0** advisories |
-| `pnpm audit` (all) | 4 (1 low, 3 moderate), development and build tooling only ([DEPENDENCIES.md](DEPENDENCIES.md)) |
-| GitHub CI (`verify`) | `55bb85c`: see PR checks · `ff143a1`: **pass** · candidate: see the PR checks for the docs commit that follows it (code identical) |
+| `pnpm install --frozen-lockfile` (clean worktree), `tsc --noEmit`, `pnpm build` | pass |
+| `pnpm lint` | 0 errors; the same 13 `<img>` warnings |
+| `pnpm test` | **128/128**: access 34, workflow 20, pagination 14, records 10, recovery 9, proposals 8, delivery 8, release 7, projects 5, migration-preflight 5, preflight 4, staging-tools 4 |
+| Flakiness check (unit) | 9 recorded full runs while preparing the candidate: 1 failed (a timing-dependent pagination assertion, fixed in `0c7c724`), 8 passed; 1 further run on `6ba656c` passed |
+| `pnpm test:worker` | **2/2** |
+| `pnpm audit --prod` / `pnpm audit` | **No known vulnerabilities** / **No known vulnerabilities** |
+| Candidate archive (`build-candidate.mjs`) | Built from a clean checkout. Embedded identity, and served identity `6ba656ccabc2`; no `.env`, `.dev.vars` or `.pem` files; no credential patterns. SHA-256 `bb6449e7…c022` |
+| Second clean build (`ae5e7fd`, same builder) | Same 339 files and normalized names; not byte-identical (random framework values). Documented, not fixed |
+| Certification rehearsal on the **extracted archive** (built Worker, fresh 0000–0008, token mode) | **48/48**; build `6ba656ccabc2` matched; token and synthetic email absent from output and Worker log |
+| Staging config and `wrangler deploy --dry-run` from the archive | pass: 1,411.76 KiB (404.64 KiB gzipped); bindings `DB`, `WORKSPACE_AUTH_MODE=token` |
+| `migration-status` on Wrangler `--json` output (Miniflare 5) | `Up to date`; no unrecognised objects |
+| GitHub CI (`verify`) | **pass** on `6ba656c` (also `3000478`, `ae5e7fd`, `5d2be8e`); later commits: see PR checks |
 
-## Browser results (candidate `af555c9`, Chromium, local dev server)
+## Browser attempts (every attempt reported)
 
-| Suite | Result | Covers |
+| Series | Code | Result |
 | --- | --- | --- |
-| `tests/browser/journey.mjs` (fresh database with a legacy document) | **30/30** | Briefing → review → convert; legacy import; follow-ups; dialogs; persistence; export |
-| `tests/browser/contracting-journey.mjs` | **27/27** in 5 of 6 runs. One run aborted; its output was not captured and the failure did not recur in 4 further runs, including the same fresh-database sequence (K11) | Briefing → opportunity → requirements/evidence → proposal review → submission → award → project → acceptance → change → closeout → experience → export → reload, with pickers searched beyond the first 20 choices |
-| `tests/browser/pagination-ui.mjs` (synthetic dataset) | **16/16** | A slower superseded search response is discarded; empty state and filter reset; error and retry with state kept; Enter on "Load more" keeps focus; polite live count; pickers make no requests until used; keyboard search and selection beyond the first 20 choices; accessible names for every control; no overflow at 390 px |
-| `tests/browser/volume.mjs` | **14/14** | Long unbroken text, desktop and mobile; one bounded page then "Load more"; server search reaching the oldest record; summary under 64 KiB |
+| Contracting journey, clean database ×4 (harness bug: server exit misattributed) | `310110b` + harness | 1 pass, 3 setup failures (harness defect, fixed) |
+| Contracting journey, clean ×5, **before the fix** | `310110b` + harness | **2 pass, 3 abort**: the crash described above, with traces |
+| Contracting journey, clean ×6, after the fix | pre-commit tree of `f9b2eb5` | 6 pass |
+| Contracting clean ×5, journey clean ×2, on the upgraded stack | `f9b2eb5` + upgrade (pre-commit tree of `3000478`) | 5 pass, 2 pass |
+| Recovery UI | pre-commit tree of `f2cac81` | 7/8, then 8/8. The first attempt's check ran before the list loaded (test timing, fixed) |
+| **Contracting journey, clean ×6** | `6ba656c` | **6 pass** |
+| **Contracting journey, repeated use ×6** (one database) | `6ba656c` | **5 pass, 1 failure**: attempt 6's briefing was refused with **429** by the intake limit (5 per 10 minutes per address). By design; the runner now classifies it (`0b355ad`) |
+| **Contracting journey, repeated use ×5** | `5d2be8e` (code = `6ba656c`) | **5 pass** |
+| **Stage 1–2 journey, clean ×2** | `6ba656c` | **2 pass** (30/30 each) |
+| **Pagination UI** (synthetic dataset) | `5d2be8e` (code = `6ba656c`) | **16/16** |
+| **Volume and long text** | `5d2be8e` (code = `6ba656c`) | **14/14** |
+| **Recovery UI** (rollback conflicts) | `5d2be8e` (code = `6ba656c`) | **8/8** |
 
-These are **automated observations**, not manual testing and not a formal accessibility conformance assessment.
+Every connected step from public briefing to export and reload is covered by the contracting journey:
 
-## Performance (same synthetic dataset, local)
+> proposal review → submission → award → project → milestones → deliverable acceptance → change → closeout → private experience record → export → reload
 
-See [PERFORMANCE.md](PERFORMANCE.md) for method and every scenario. The headline figure is the payload on every workspace load:
+Run outputs (summaries, server logs, and diagnostics for failures) are under the git-ignored `outputs/browser-series/` on the build machine. They are not committed, because traces may contain synthetic page content and the loopback session cookie.
 
-| | Baseline `e07844b` | Candidate `af555c9` |
-| --- | --- | --- |
-| `GET /api/workflow` | 6,060,842 bytes, 6,451 records | 22,101 bytes, 70 summary items |
-| Initial load `/api/*` bytes | 6,061,023 | 22,282 |
+**Unresolved uncertainty:**
 
-Searches are server round trips: about 300–450 ms, including the 250 ms debounce, against about 20–70 ms in memory before. The export is complete in both at this size; the baseline cap at 2,000 is gone.
+- The original abort reported for `af555c9` (1 of 6) has no captured output. The reproduced crash matches its step and timing, but that link is inferred, not proven.
+- No unexplained failure occurred in 28 contracting attempts after the fix: 27 passed, and 1 was the by-design intake refusal.
 
-## Migrations, backup and recovery
+## Performance
 
-| Scenario | Result | Commit |
-| --- | --- | --- |
-| Empty database, all of 0000–0007 (real Wrangler) | Applied; status `Up to date` | `af555c9` |
-| Status on a 0006 database | Prescribes only 0007 | `af555c9` |
-| Partial 0007 (7 of 18 indexes); partial 0003 (tables without columns, data present) | Detected as partial; whole-file rerun fails; resuming the missing statements completes it; data preserved | `af555c9` (test) |
-| Out of order (0006 without 0005) | Detected; nothing prescribed | `af555c9` (test) |
-| This code without 0007 | Lists, context, reports, summary and export work | `af555c9` (test) |
-| Interrupted legacy import | No partial rows, snapshot or document change; the retry imports once | `af555c9` (test) |
-| Backup with `wrangler d1 export --local`, restore into an empty state | Owner export identical before and after (document, all records, ids, versions, links, counts) | `af555c9` |
-| Previous candidate `e07844b` on this release's data (0007 applied) | Reads every record identically; its contracting journey passes 27/27 | `e07844b` on `af555c9` data |
-| Code-only rollback to Site v5 after the import | **Unsafe:** v5 GET shows no requests or opportunities; v5 save returns 400 | original v5 handler (`2af4266`) |
-| v5 rollback with the legacy-document tool, then forward | v5 read 3 requests, 3 opportunities and 1 legacy activity entry; its save returned 200. Forward again: only the v5-period request was added; nothing was duplicated; every contracting record was identical | `af555c9` + v5 handler |
-| Legacy-document tool on 1,200 requests | Refused (1.94 M characters is over v5's 700,000 limit) | `af555c9` |
-| Hosted D1 backup/restore, Sites migration tracking | **Not verified** (K2) | — |
+See [PERFORMANCE.md](PERFORMANCE.md). On the upgraded stack (`6ba656c` code, same synthetic dataset), payloads are unchanged from `af555c9`:
+
+- summary 22,125 bytes, 43 ms median;
+- initial load 3 requests, about 21.8 KiB;
+- the export is complete.
+
+## Migrations, backup and recovery (candidate `6ba656c`)
+
+| Scenario | Result |
+| --- | --- |
+| Fresh install (all 0000–0008, Wrangler) | Applied; status `Up to date` |
+| Preflight CLI: empty / previous release (0006) / full / partial / failed / ambiguous | Refused without confirmation / prescribes 0007–0008 only / up to date / refused with resume statements / refused / refused (tests) |
+| Without 0008 | Readiness reports the schema `incomplete`. 0008 must be applied before deploying |
+| Rollback-window edits | Become open conflicts; tables unchanged until decided; keep and apply recorded; stale-record apply refused; re-import idempotent (tests, browser 8/8) |
+| v5 tool | Refuses incomplete exports, documents over 700,000 characters, and runs without confirmation (tests) |
+| Previous candidate `e07844b` on this release's data | Verified on `af555c9` data (0007). **Not re-run on 0008 data**; 0008 only adds a table that older code does not read |
+| Hosted backup/restore, Sites migration tracking | **Not verified** (K2) |
 
 ## Security and data boundaries (verified locally)
 
-- **New reads:** every new endpoint (`/api/records/:type` GET, `/api/records/:type/:id` GET, `/api/context`, `/api/followups`, `/api/reports`, `/api/export`, `/api/evidence-links`, `/api/organizations/duplicates`) returns 401 for anonymous and wrong-token callers, with no record content (test).
-- **Injection:** search and filters are bound parameters, and only allowlisted columns reach SQL. Quote, comment and wildcard payloads are treated literally (test).
-- **Prototype keys:** a `__proto__` type returns 404 (found and fixed in this candidate).
-- **Summary:** `/api/workflow` carries no notes, scopes or contact emails and stays under 20 KB in tests. `recentOpportunities` holds card fields only.
-- **Earlier boundaries hold:** CSRF, body limits, rate limits, public-intake field rejection, server-side actors and public projection (unchanged tests).
-- **Logs:** exports log counts only. No token or contact email appeared in rehearsal output or Worker logs.
-- **Accountability:** token mode is a shared credential with no individual attribution ([OPERATIONS.md](OPERATIONS.md)).
-
-## Acceptance evidence (candidate `af555c9`)
-
-| Requirement | Scenario | Expected and observed | Evidence |
-| --- | --- | --- | --- |
-| Bounded loading | Workspace load on 1,200 requests and 400 opportunities | 22 KB summary; 25-record pages | perf; volume |
-| Pagination limits | `limit` 0, 101, `abc`, 2.5; unknown sort, filter or parameter; long `q`; more than 100 ids | 400 `invalid_parameter` | pagination test |
-| Equal sort values | 37 rows with identical timestamps and titles | Every row exactly once, id order | pagination test |
-| Concurrent changes during paging | Insert, edit, and delete the cursor anchor between pages | No duplicates; no original row skipped | pagination test |
-| Stale responses | A slower earlier search | Discarded | pagination-ui |
-| Relationships beyond page 1 | Contact on an organization only in the last page; picker beyond the first 20 choices | Linked and selectable | pagination test; pagination-ui; contracting journey |
-| Complete reports | 131 expired evidence records and more | Count 131+, 100 items, `truncated` | pagination test |
-| Complete export | 2,100 opportunities | All exported; manifest matches | pagination test; perf |
-| Export refusal | Row or byte limit exceeded | 413; nothing downloaded | pagination test |
-| Recovery | See the table above | As listed | recovery test; manual runs |
-
-**Human acceptance still required:**
-
-- owner sign-off on wording and branding;
-- hosted Sites sign-in;
-- screen-reader and cross-browser review;
-- the business rules;
-- whether search should become full-text.
+- **New endpoint:** `GET /api/import-conflicts` is owner-only like every read endpoint. Conflict decisions go through the owner-only, CSRF-protected actions route.
+- **Staging tools:** they refuse production identifiers and need exact target confirmation. Certification creates no records unless the target is the expected, ready build. The token never appears in output (tests and rehearsal).
+- **The candidate archive** holds no local configuration or credentials from this repository. It does hold vinext's per-build preview and Server Actions keys, so store it privately.
+- Earlier boundaries are unchanged; see the history sections.
 
 ## Known issues and blockers
 
-| ID | Issue | Severity | Impact | Workaround | Owner / decision | Next action |
-| --- | --- | --- | --- | --- | --- | --- |
-| K1 | No authorized isolated staging target | **Blocker** (hosted and production) | Hosted behavior uncertified | Local rehearsal only | Owner | Authorize a staging Worker and D1 (or an isolated Site) and a scoped credential; follow [STAGING.md](STAGING.md) |
-| K2 | Sites-managed D1: backup/restore and migration tracking unconfirmed | **Blocker** (production) | A failed or replayed migration may be unrecoverable | Inspect with `migration-status` before publishing; take an owner export | Owner/platform | Confirm both procedures and rehearse on staging |
-| K3 | Hosted Sign in with ChatGPT and owner allowlist not verified; no runtime variables set on the Site | **Blocker** (production on Sites) | Workspace locked (503) after deploy | Token mode on another host | Owner | Set `WORKSPACE_AUTH_MODE=sites` and `WORKSPACE_OWNER_IDS`; verify owner, non-owner and anonymous |
-| K4 | Dependency advisories | **Resolved** for production (audit 0) | 4 development/build advisories remain, documented | — | Engineering | Upgrade vinext and wrangler in a dedicated change (backlog) |
-| K5 | `/api/workflow` unpaginated | **Resolved** | — | — | — | — |
-| K6 | Shared-credential accountability in token mode | Medium | Activity cannot identify individuals | Use `sites` mode | Owner | Decide the auth mode per environment |
-| K7 | No file uploads | Low (by design) | References and links only | Private drive | Owner | Authorize R2 if needed |
-| K8 | Accessibility checks are structural only | Medium | Not a WCAG claim | — | Owner | Screen-reader and contrast audit |
-| K9 | vinext is beta (`1.0.0-beta.5`) | Medium | Framework defects possible | Pinned lockfile; CI | Engineering | Track releases |
-| K10 | Open tabs during deploy get 409 on save | Low (expected) | Reload | — | — | In the checklist |
-| K11 | One unexplained contracting-journey abort in 6 runs | Low | Possible local flake | Rerun | Engineering | Capture full output on any recurrence |
-| K12 | Search is substring matching (`LIKE`) without a full-text index | Low at current scale | Search cost grows with table size | Filters narrow results | Engineering | Measure on staging; consider FTS5 |
-| K13 | v5 rollback only fits while the legacy document is ≤ 700,000 characters | Medium (recovery) | Larger workspaces cannot roll back to v5 | Fix forward or restore a backup | Owner | Decide whether a v5 rollback must remain possible |
-| K14 | The client cache grows with the records viewed in a session | Low | Memory in very long sessions | Reload | Engineering | Bound or evict if needed |
+| ID | Issue | Severity | Next action |
+| --- | --- | --- | --- |
+| K1 | No authorized isolated staging target | **Blocker** (hosted and production) | Owner decision; see the end of this document and [STAGING_HANDOFF.md](STAGING_HANDOFF.md) |
+| K2 | Sites-managed D1: backup/restore and migration tracking unconfirmed | **Blocker** (production) | Confirm with the platform; certify on route B |
+| K3 | Hosted Sign in with ChatGPT and owner allowlist not verified; no runtime variables on the Site | **Blocker** (production on Sites) | Route B certification |
+| K4 | Dependency advisories | **Resolved**: audit clean | Keep auditing per release |
+| K6 | Token mode is a shared credential (no individual attribution) | Medium | Decide the auth mode per environment |
+| K7 | No file uploads | Low (by design) | — |
+| K8 | Accessibility checks are structural only | Medium | Screen-reader and contrast audit |
+| K9 | vinext 1.x and Miniflare 5 **beta** in local tooling | Medium | Track releases; re-verify on upgrade |
+| K10 | Open tabs during deploy get 409 on save | Low (expected) | In the checklist |
+| K11 | The original `af555c9` abort has no captured output (see Browser attempts) | Low | Diagnostics now capture any recurrence |
+| K12 | Substring search without a full-text index | Low | Measure on staging |
+| K13 | v5 rollback only fits up to 700,000 characters; the previous release is preferred | Medium (recovery) | Owner decision on whether v5 must stay possible |
+| K14 | The client cache grows within a session | Low | Bound if needed |
+| K15 | Builds are not byte-reproducible (vinext per-build keys); the archive holds framework keys | Medium (release process) | Deploy the recorded archive only; store it privately |
+| K16 | `minimatch` 11 is forced outside typescript-estree's declared `^10` range (lint only) | Low | Drop the override when typescript-eslint moves to 11 |
 
 ## Configuration (names and placeholders only)
 
@@ -179,28 +153,81 @@ No new configuration was added in this candidate.
 
 ## Migration order
 
-Inspect first with `node scripts/migration-status.mjs`, then apply only the pending files, in order: 0000 → 0001 → … → 0007. Every file is additive; 0007 is indexes only. Compatibility, interrupted-migration resume and rollback are in [OPERATIONS.md](OPERATIONS.md).
+Inspect first with `node scripts/migration-status.mjs` (see the exit codes in [OPERATIONS.md](OPERATIONS.md)). Then apply only the pending files, in order: 0000 → … → 0008. All are additive. Apply 0008 before deploying this code.
 
 ## Production acceptance checklist
 
-- [ ] K1–K3 resolved; staging certification (48 checks and the browser journeys) passed on the exact release commit
+- [ ] K1–K3 resolved. Staging certification recorded per [STAGING_HANDOFF.md](STAGING_HANDOFF.md) §12 on `6ba656c` and archive `bb6449e7…c022`, including route B for Sites authentication
 - [ ] CI green on the release commit; `pnpm preflight --target production` passes
-- [ ] Production backup taken; restore procedure confirmed and rehearsed on staging
+- [ ] Production backup taken; restore confirmed and rehearsed
 - [ ] `migration-status` on production; only the listed files applied; `Up to date`
 - [ ] Access variables set
-- [ ] The [OPERATIONS.md](OPERATIONS.md) production release checklist is completed
+- [ ] The [OPERATIONS.md](OPERATIONS.md) production checklist is completed
 
 ## Production deployment steps (after authorization only)
 
-1. Freeze the release commit and build with `BUILD_COMMIT=<sha> pnpm build`.
-2. Take a production backup (platform procedure) and an owner export.
-3. Inspect migrations, then apply exactly the pending files through the supported workflow, and re-inspect.
-4. Configure access variables and secrets.
-5. Deploy the matching artifact.
-6. Verify `/api/health` reports the release commit and `/api/health/ready` returns 200.
-7. Run anonymous checks: owner APIs return 401 and `/api/site` excludes private data. Have the owner sign in once (the legacy import runs) and verify counts against the snapshot.
-8. Ask owners to reload open tabs. Watch the prepared signals manually (alerts are not active).
-9. Rollback: choose from the rollback table in [OPERATIONS.md](OPERATIONS.md). Never redeploy the pre-workflow Site v5 code without first rebuilding its document.
+1. Verify the archive checksum and deploy **that archive**. Do not rebuild.
+2. Take a backup (platform procedure) and an owner export.
+3. Inspect migrations, apply exactly the pending files, and re-inspect.
+4. Configure access variables and secrets; deploy.
+5. Check `/api/health` (build `6ba656ccabc2`) and `/api/health/ready` (200); run the anonymous checks; the owner signs in once (import) and verifies counts.
+6. Rollback: redeploy the previous release first ([OPERATIONS.md](OPERATIONS.md)). Use the v5 path only when necessary, within its limits.
+
+## Decision required
+
+Choose one isolated staging route and authorize it ([STAGING_HANDOFF.md](STAGING_HANDOFF.md) §2–5):
+
+- **Route A (Cloudflare token mode).** Name a Cloudflare account and approve its Workers and D1 usage. Create an API token limited to Workers Scripts: Edit and D1: Edit on that account, and keep it in your secret store. It certifies the application, the migrations and backup/restore, but **not** Sites sign-in.
+- **Route B (isolated Sites).** Create a separate, non-production Site with its own database and a staging owner account. It certifies Sign in with ChatGPT, the owner allowlist and Sites-managed migrations and backup. It is required before production on Sites.
+
+## History: candidate `af555c9` (evidence kept as recorded)
+
+These results apply to `af555c9` only.
+
+### Automated results (candidate `af555c9`)
+
+| Check | Result |
+| --- | --- |
+| `pnpm install --frozen-lockfile` | pass |
+| `pnpm exec tsc --noEmit` | pass |
+| `pnpm lint` | pass: 0 errors, the same 13 `<img>` warnings |
+| `pnpm test` | **115/115**: access 34, workflow 20, pagination 14, records 10, proposals 8, delivery 8, release 7, projects 5, recovery 5, preflight 4 |
+| `pnpm build` | pass; build identity `af555c9e97bd` embedded |
+| `pnpm test:worker` | **2/2** (built Worker, every migration, paginated list) |
+| `scripts/staging-certify.mjs` against the built Worker (fresh 0000–0007 database, token mode) | **48/48**; reported build `af555c9e97bd` matched; token and synthetic email absent from output and Worker log |
+| `wrangler deploy --dry-run` with a generated staging config | pass: 1,185.38 KiB (329.46 KiB gzipped); bindings `DB`, `WORKSPACE_AUTH_MODE` |
+| `pnpm audit --prod` | **0** advisories |
+| `pnpm audit` (all) | 4 (1 low, 3 moderate), development and build tooling only ([DEPENDENCIES.md](DEPENDENCIES.md)) |
+| GitHub CI (`verify`) | `55bb85c`: see PR checks · `ff143a1`: **pass** · candidate: see the PR checks for the docs commit that follows it (code identical) |
+
+### Browser results (candidate `af555c9`, Chromium, local dev server)
+
+| Suite | Result | Covers |
+| --- | --- | --- |
+| `tests/browser/journey.mjs` (fresh database with a legacy document) | **30/30** | Briefing → review → convert; legacy import; follow-ups; dialogs; persistence; export |
+| `tests/browser/contracting-journey.mjs` | **27/27** in 5 of 6 runs. One run aborted; its output was not captured and the failure did not recur in 4 further runs, including the same fresh-database sequence (K11) | Briefing → opportunity → requirements/evidence → proposal review → submission → award → project → acceptance → change → closeout → experience → export → reload, with pickers searched beyond the first 20 choices |
+| `tests/browser/pagination-ui.mjs` (synthetic dataset) | **16/16** | A slower superseded search response is discarded; empty state and filter reset; error and retry with state kept; Enter on "Load more" keeps focus; polite live count; pickers make no requests until used; keyboard search and selection beyond the first 20 choices; accessible names for every control; no overflow at 390 px |
+| `tests/browser/volume.mjs` | **14/14** | Long unbroken text, desktop and mobile; one bounded page then "Load more"; server search reaching the oldest record; summary under 64 KiB |
+
+These are **automated observations**, not manual testing and not a formal accessibility conformance assessment.
+
+### Migrations, backup and recovery (candidate `af555c9`)
+
+| Scenario | Result | Commit |
+| --- | --- | --- |
+| Empty database, all of 0000–0007 (real Wrangler) | Applied; status `Up to date` | `af555c9` |
+| Status on a 0006 database | Prescribes only 0007 | `af555c9` |
+| Partial 0007 (7 of 18 indexes); partial 0003 (tables without columns, data present) | Detected as partial; whole-file rerun fails; resuming the missing statements completes it; data preserved | `af555c9` (test) |
+| Out of order (0006 without 0005) | Detected; nothing prescribed | `af555c9` (test) |
+| This code without 0007 | Lists, context, reports, summary and export work | `af555c9` (test) |
+| Interrupted legacy import | No partial rows, snapshot or document change; the retry imports once | `af555c9` (test) |
+| Backup with `wrangler d1 export --local`, restore into an empty state | Owner export identical before and after (document, all records, ids, versions, links, counts) | `af555c9` |
+| Previous candidate `e07844b` on this release's data (0007 applied) | Reads every record identically; its contracting journey passes 27/27 | `e07844b` on `af555c9` data |
+| Code-only rollback to Site v5 after the import | **Unsafe:** v5 GET shows no requests or opportunities; v5 save returns 400 | original v5 handler (`2af4266`) |
+| v5 rollback with the legacy-document tool, then forward | v5 read 3 requests, 3 opportunities and 1 legacy activity entry; its save returned 200. Forward again: only the v5-period request was added; nothing was duplicated; every contracting record was identical | `af555c9` + v5 handler |
+| Legacy-document tool on 1,200 requests | Refused (1.94 M characters is over v5's 700,000 limit) | `af555c9` |
+| Hosted D1 backup/restore, Sites migration tracking | **Not verified** (K2) | — |
+
 
 ## History: previous candidate `36ce7a1` (evidence kept as recorded)
 

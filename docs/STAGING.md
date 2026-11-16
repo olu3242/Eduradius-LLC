@@ -93,7 +93,16 @@ The browser journeys use the loopback mock sign-in and run only against a local 
 
 ## Local rehearsal (performed)
 
-**Candidate `af555c9`.** The run used the **built Worker** (`wrangler dev` on the production bundle), a database freshly migrated with 0000–0007, token mode and a throwaway local token:
+**Candidate `6ba656c`, exact archive.** The run used the extracted candidate archive (SHA-256 `bb6449e7…c022`, verified), served by `wrangler dev`, with a fresh database migrated 0000–0008 and token mode:
+
+- certification **48/48**; build `6ba656ccabc2` matched;
+- no token or synthetic email in the output or the Worker log;
+- `staging-config` with a complete target confirmation, then `wrangler deploy --dry-run`: 1,411.76 KiB (404.64 KiB gzipped), bindings `DB` and `WORKSPACE_AUTH_MODE=token`.
+
+This is a rehearsal, **not hosted certification**.
+
+
+**Candidate `af555c9` (historical).** The run used the **built Worker** (`wrangler dev` on the production bundle), a database freshly migrated with 0000–0007, token mode and a throwaway local token:
 
 - the certification script passed **48/48**;
 - the reported build `af555c9e97bd` matched the candidate;

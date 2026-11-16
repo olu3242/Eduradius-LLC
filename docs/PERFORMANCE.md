@@ -66,6 +66,34 @@ The baseline's single `/api/workflow` request took 204 ms server time in its sec
 
 The previous release package recorded 1.3 MiB for 80 organizations, 80 opportunities, 50 requirements and 60 evidence records, and 2.5 MiB for roughly double. That came from `tests/browser/volume.mjs` on candidate `36ce7a1` and is kept in [RELEASE.md](RELEASE.md) history. The same volume script on `af555c9` measured `GET /api/workflow` at 22 KiB and 24 ms, with 14/14 checks passing.
 
+## Candidate `6ba656c` on the upgraded stack
+
+Measured with vinext 1.4.4, React 19.3.1, Wrangler 4.157.0 and Miniflare 5, on the same seeded dataset with migrations 0007 and 0008 applied. The dev server reported build `5d2be8e67698`, which is the candidate's code plus documentation only. Two runs, `run 1 / run 2`:
+
+| Scenario | Result |
+| --- | --- |
+| `GET /api/workflow` (median of 5) | 22,125 bytes (+24 for `openImportConflicts`), 70 summary items, 43 / 43 ms |
+| Initial workspace load | 3 requests, 22,306 bytes; 2,329 / 1,000 ms to network idle |
+| Open Opportunities | 1 request, 53,361 bytes, 25 cards; 270 / 177 ms |
+| Open Organizations | 2 requests, 39,227 bytes, 25 cards; 141 / 139 ms |
+| Search opportunities (last record) | 1 request, 2,212 bytes; 459 / 437 ms (includes the 250 ms debounce) |
+| Search organizations (newest / oldest record) | 1 request each, about 1.65 KB; 342 / 344 and 326 / 324 ms |
+| Open a pursuit with 30 requirements | 2 requests, 73,160 bytes; 1,134 / 1,009 ms |
+| Export | 1 request, 7,949,512 bytes; **complete** (every collection equals its table count); 714 / 652 ms |
+
+**Server time per request (browser timing):**
+
+| Request | Run 1 (cold) | Run 2 |
+| --- | --- | --- |
+| Summary | 118–151 ms | 50–53 ms |
+| List pages | 38–85 ms | 38–85 ms |
+| Pursuit context | 101 ms | 55 ms |
+| Export | 396 ms | 297 ms |
+
+These are slightly slower than the `af555c9` runs on the previous stack. The runs were on the same machine but at different times, under the same dev server conditions, so the differences are not evidence of a regression or an improvement. Byte counts and request counts are unchanged.
+
+`volume.mjs` on the same code: summary 22 KiB in 43 ms; 14/14 checks.
+
 ## Reproduce
 
 ```sh

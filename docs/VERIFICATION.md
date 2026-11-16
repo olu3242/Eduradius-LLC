@@ -141,3 +141,29 @@ Defects found and fixed during this iteration:
 - the summary carried full opportunity notes;
 - every evidence picker loaded on mount (32 requests when opening a pursuit);
 - the migration status tool advised applying every file when given a failed query result.
+
+## Iteration 7: reliability, recovery, preflight and reproducible candidate (candidate `6ba656c`, local only)
+
+Environment: Linux container, Node 22.23.4, pnpm 11.25.0, Wrangler 4.157.0 (Miniflare 5), vinext 1.4.4, Chromium (Playwright). No hosted environment was used.
+
+| Check | Commit | Result |
+| --- | --- | --- |
+| Contracting-journey abort reproduced on clean databases (diagnostics and traces captured) | `310110b` | 3 of 5 aborted: a workspace crash after an aborted list request |
+| Same series after the fix | `f9b2eb5` | 6/6 |
+| Upgrade (vinext 1.4.4, wrangler 4.157.0): tsc, lint, 115 tests, build, worker smoke, `db:generate`, staging dry run | `3000478` | pass; `pnpm audit`: no known vulnerabilities |
+| Unit suite | `6ba656c` | 128/128. 9 recorded full runs while preparing the candidate: 1 failure (timing-dependent assertion, fixed in `0c7c724`) |
+| Built-Worker smoke | `6ba656c` | 2/2 |
+| Candidate archive from a clean worktree | `6ba656c` | SHA-256 `bb6449e7…c022`; served identity `6ba656ccabc2`; no configuration or credential files |
+| Certification rehearsal on the extracted archive | `6ba656c` | 48/48; no token or email in output or logs |
+| Browser: contracting clean ×6 / repeated ×6 / repeated ×5 | `6ba656c` / `6ba656c` / `5d2be8e` (same code) | 6/6 / 5/6 (one 429 from the intake limit by design) / 5/5 |
+| Browser: Stage 1–2 ×2, pagination UI, volume, recovery UI | `6ba656c` / `5d2be8e` (same code) | 2/2, 16/16, 14/14, 8/8 |
+| `migration-status` against Wrangler `--json` on Miniflare 5 | `6ba656c` | correct; no unrecognised objects |
+
+Defects found and fixed:
+
+- The workspace crashed after an aborted mid-body response.
+- The series harness misattributed an earlier server's exit to the next attempt.
+- A pagination test assumed creation order within one millisecond.
+- The recovery browser check read the list before it had loaded.
+- The release build id was random.
+- The candidate builder looked for the identity in the wrong file, and archived after serving.
