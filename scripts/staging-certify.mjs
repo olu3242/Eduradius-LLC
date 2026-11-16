@@ -5,17 +5,22 @@
 //   STAGING_BASE_URL=https://<staging-host> \
 //   STAGING_CONFIRM_HOST=<staging-host> \
 //   STAGING_ACCESS_TOKEN=<staging token from your secret store> \
-//   node scripts/staging-certify.mjs [--expect-build <commit>]
+//   node scripts/staging-certify.mjs --expect-build <candidate commit SHA>
 //
-// Guards: refuses the production Site host and any host not typed exactly in
-// STAGING_CONFIRM_HOST; the token is never printed; output is a JSON summary.
-const PRODUCTION_HOSTS = ['eduradius-contract-workspace.olufemi-adey-1577.chatgpt.site'];
+// Token mode only (it signs in with the access token). For Sites-native staging, run the browser
+// journeys signed in with ChatGPT instead; this script does not certify Sites authentication.
+// Guards: refuses the production Site (scripts/production-identity.json) and any host not typed
+// exactly in STAGING_CONFIRM_HOST; requires --expect-build; checks liveness, the deployed build
+// and readiness BEFORE creating any record and stops if any fails; never prints the token.
+import { readFileSync } from 'node:fs';
+const PRODUCTION_HOSTS = JSON.parse(readFileSync(new URL('./production-identity.json', import.meta.url), 'utf8')).hosts;
 const base = process.env.STAGING_BASE_URL?.replace(/\/$/, '');
 const confirm = process.env.STAGING_CONFIRM_HOST;
 const token = process.env.STAGING_ACCESS_TOKEN;
 const expectBuild = process.argv.includes('--expect-build') ? process.argv[process.argv.indexOf('--expect-build') + 1] : null;
 const fail = msg => { console.error(`Refusing to run: ${msg}`); process.exit(2); };
 if (!base || !confirm || !token) fail('set STAGING_BASE_URL, STAGING_CONFIRM_HOST and STAGING_ACCESS_TOKEN.');
+if (!expectBuild || !/^[0-9a-f]{7,40}$/.test(expectBuild)) fail('pass --expect-build <candidate commit SHA>.');
 const host = new URL(base).hostname;
 if (PRODUCTION_HOSTS.includes(host)) fail('the target is the production Site.');
 if (host !== confirm) fail('STAGING_CONFIRM_HOST must exactly match the target hostname.');
@@ -35,10 +40,16 @@ const ok = (r, status = 200) => r.status === status;
 // 1. Health and build identity
 const live = await call('/api/health', { auth: false });
 record('liveness', ok(live) && live.json?.status === 'ok', `build ${live.json?.build}`);
-if (expectBuild) record('deployed build matches candidate', String(live.json?.build ?? '').startsWith(expectBuild.slice(0, 12)), `expected ${expectBuild}`);
+record('deployed build matches candidate', String(live.json?.build ?? '').startsWith(expectBuild.slice(0, 12)), `expected ${expectBuild}`);
 const ready = await call('/api/health/ready', { auth: false });
 record('readiness (database, schema, access configured)', ok(ready), JSON.stringify(ready.json?.checks));
 record('responses carry a correlation id', Boolean(live.requestId));
+// Stop before any write if the target is not the expected, ready candidate.
+const gate = results.filter(r => r.result === 'fail');
+if (gate.length) {
+  console.log(JSON.stringify({ target: host, refused: 'pre-flight checks failed; no records were created', build: live.json?.build ?? null, results }, null, 2));
+  process.exit(2);
+}
 
 // 2. Access boundaries (anonymous, forged identity, invalid credentials)
 const privatePaths = ['/api/workspace', '/api/workflow', '/api/records/inquiry', '/api/export'];

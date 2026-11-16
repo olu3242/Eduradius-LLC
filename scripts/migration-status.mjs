@@ -8,7 +8,8 @@
 //   Resume a PARTIAL file (prints only its missing statements; review, then apply them):
 //                    node scripts/migration-status.mjs --wrangler-json schema.json --resume-sql 0007_list_indexes.sql > resume.sql
 //
-// Exit codes: 0 = consistent (applied files form a prefix), 2 = partial or out-of-order (recover first).
+// Exit codes: 0 = consistent (applied files form a prefix); 1 = inspection failed, unreadable or empty;
+// 2 = partial, out-of-order, unrecognised objects, or tracking that disagrees with the schema.
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -78,24 +79,48 @@ export function resumeStatements(file, rows, read = f => readFileSync(new URL(f,
   }).map(st => (st.endsWith(';') ? st : st + ';'));
 }
 
+const PLATFORM_TABLES = new Set(['_cf_KV', '_cf_METADATA', 'd1_migrations', 'sqlite_sequence']);
+/** Objects no migration creates (platform tables excluded): the tool cannot vouch for such a database. */
+export function unrecognised(rows, files = migrationFiles(), read = f => readFileSync(new URL(f, DIR), 'utf8')) {
+  const known = new Set(files.flatMap(f => expectedObjects(read(f))).filter(o => o.kind !== 'column').map(o => `${o.kind}:${o.name}`));
+  return rows.filter(r => r.kind !== 'column' && !PLATFORM_TABLES.has(r.tbl) && !known.has(`${r.kind}:${r.name}`)).map(r => `${r.kind} ${r.name}`);
+}
+const readJson = file => { try { return JSON.parse(readFileSync(file, 'utf8')); } catch (e) { throw new Error(`${file} is not readable JSON (${e.message.slice(0, 80)}).`); } };
+const wranglerResults = (parsed, what) => {
+  const entries = Array.isArray(parsed) ? parsed : [parsed];
+  const failed = entries.find(e => !e || typeof e !== 'object' || e.error || e.success === false || !Array.isArray(e.results));
+  if (failed) throw new Error(`The ${what} query failed or returned an unexpected shape: ${JSON.stringify(failed).slice(0, 200)}`);
+  return entries.flatMap(r => r.results);
+};
+
 async function main(args) {
   if (args.includes('--print-query')) { console.log(SCHEMA_QUERY); return 0; }
   let rows;
   const at = flag => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : null; };
-  if (at('--sqlite')) {
-    const { DatabaseSync } = await import('node:sqlite');
-    const db = new DatabaseSync(at('--sqlite'), { readOnly: true });
-    rows = schemaRows(db.prepare(SCHEMA_QUERY).all()); db.close();
-  } else if (at('--wrangler-json')) {
-    const parsed = JSON.parse(readFileSync(at('--wrangler-json'), 'utf8'));
-    const entries = Array.isArray(parsed) ? parsed : [parsed];
-    if (entries.some(e => e?.error || e?.success === false)) { console.error(`The schema query failed: ${JSON.stringify(entries.find(e => e?.error || e?.success === false)).slice(0, 200)}`); return 1; }
-    rows = schemaRows(entries.flatMap(r => r.results ?? []));
-  } else { console.error('Usage: --sqlite <file> | --wrangler-json <file> | --print-query'); return 1; }
+  try {
+    if (at('--sqlite')) {
+      const { DatabaseSync } = await import('node:sqlite');
+      const db = new DatabaseSync(at('--sqlite'), { readOnly: true });
+      rows = schemaRows(db.prepare(SCHEMA_QUERY).all()); db.close();
+    } else if (at('--wrangler-json')) rows = schemaRows(wranglerResults(readJson(at('--wrangler-json')), 'schema'));
+    else { console.error('Usage: --sqlite <file> | --wrangler-json <file> | --print-query'); return 1; }
+  } catch (e) { console.error(`REFUSED: could not inspect the database: ${e.message}`); return 1; }
   // Fail closed: an empty or unreadable schema must never turn into "apply everything".
-  if (!rows.length && !args.includes('--empty-database-ok')) { console.error('No schema objects were read. If this is a brand-new empty database, rerun with --empty-database-ok.'); return 1; }
+  if (!rows.length && !args.includes('--empty-database-ok')) { console.error('REFUSED: no schema objects were read. If this is a brand-new empty database, rerun with --empty-database-ok.'); return 1; }
+  const strange = unrecognised(rows);
+  if (strange.length && !args.includes('--allow-unrecognised')) {
+    console.error(`REFUSED: objects that no migration creates: ${strange.slice(0, 10).join(', ')}${strange.length > 10 ? ', …' : ''}. Confirm this is the intended database; rerun with --allow-unrecognised only if they are expected.`);
+    return 2;
+  }
   if (at('--resume-sql')) { console.log(resumeStatements(at('--resume-sql'), rows).join('\n')); return 0; }
   const result = migrationStatus(rows);
+  // Platform migration tracking must agree with the schema; otherwise the state is ambiguous.
+  if (rows.some(r => r.kind === 'table' && r.name === 'd1_migrations')) {
+    if (!at('--d1-migrations-json')) { console.error('REFUSED: this database has Wrangler migration tracking (d1_migrations). Also pass --d1-migrations-json <file> from: wrangler d1 execute <db> --remote --json --command "SELECT name FROM d1_migrations ORDER BY id"'); return 2; }
+    let tracked;
+    try { tracked = wranglerResults(readJson(at('--d1-migrations-json')), 'd1_migrations').map(r => String(r.name)); } catch (e) { console.error(`REFUSED: ${e.message}`); return 1; }
+    if (JSON.stringify(tracked) !== JSON.stringify(result.applied)) { console.error(`REFUSED: d1_migrations lists [${tracked.join(', ')}] but the schema shows [${result.applied.join(', ')}] applied. Reconcile before applying anything.`); return 2; }
+  }
   for (const s of result.status) console.log(`${s.state.padEnd(8)} ${s.file}${s.missing.length && s.state === 'partial' ? `  missing: ${s.missing.join(', ')}` : ''}`);
   if (!result.consistent) {
     console.log('\nNOT CONSISTENT: a migration is partially applied or applied out of order. Do not apply further files.');

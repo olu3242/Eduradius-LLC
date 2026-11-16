@@ -1,0 +1,8 @@
+{
+  "description": "Identifiers of the LIVE production Site. Staging tooling refuses any target that matches them. Not secrets.",
+  "hosts": ["eduradius-contract-workspace.olufemi-adey-1577.chatgpt.site"],
+  "sitesProjectIds": ["appgprj_6aefcc9dd4cc819192abd77b7c85f351"],
+  "workerNames": ["eduradius-contract-workspace"],
+  "d1DatabaseNames": ["site-creator-d1"],
+  "d1DatabaseIds": ["00000000-0000-4000-8000-000000000000"]
+}
