@@ -2,7 +2,7 @@
 // One table per type is the authoritative source; every write is version-checked and
 // recorded in activity with a server-derived actor and timestamp.
 import { env } from 'cloudflare:workers';
-import { SPECS, defaults, validateRecord, organizationKey, websiteDomain, emailKey, evidenceState, type TypeSpec, type Values, type EvidenceLink } from '../records';
+import { SPECS, defaults, validateRecord, validateSections, organizationKey, websiteDomain, emailKey, evidenceState, type TypeSpec, type Values, type EvidenceLink } from '../records';
 import { businessDate, type ActivityDraft } from '../workflow';
 import { activityStatement, type StoreResult } from './workflow-store';
 
@@ -24,7 +24,7 @@ export function toRecord(spec: TypeSpec, row: Row): Values {
   }
   return out;
 }
-const toColumn = (kind: string, value: unknown) => (kind === 'bool' ? (value ? 1 : 0) : kind === 'refs' || kind === 'json' ? JSON.stringify(value ?? (kind === 'refs' ? [] : {})) : value ?? null);
+export const toColumn = (kind: string, value: unknown) => (kind === 'bool' ? (value ? 1 : 0) : kind === 'refs' || kind === 'json' ? JSON.stringify(value ?? (kind === 'refs' ? [] : {})) : value ?? null);
 
 export async function getRecord(type: string, id: string): Promise<Values | null> {
   const spec = SPECS[type]; if (!spec) return null;
@@ -53,6 +53,8 @@ export async function listAllRecords() {
 type Hook = {
   derive?: (v: Values) => Values;
   validate?: (v: Values, current: Values | null) => Promise<string | null>;
+  /** Server-side consequences of an edit (may set read-only fields and add activity). */
+  adjust?: (v: Values, current: Values, changed: string[]) => { value: Values; events?: ActivityDraft[] };
 };
 async function linkedEvidence(subjectType: string, subjectId: string): Promise<Values[]> {
   const rows = (await db().prepare('SELECT e.* FROM evidence e JOIN evidence_links l ON l.evidence_id = e.id WHERE l.subject_type = ? AND l.subject_id = ?').bind(subjectType, subjectId).all<Row>()).results;
@@ -76,7 +78,23 @@ export const HOOKS: Record<string, Hook> = {
   evidence: {
     validate: async v => (v.storageKind === 'External link' && !v.url ? 'Provide the approved https link, or choose Reference only.' : v.storageKind === 'Reference only' && v.url ? 'Clear the link or choose External link.' : null),
   },
+  proposal: {
+    validate: async (v, current) => {
+      if (current?.status === 'Internal review') return 'This proposal is locked while it is in owner review. Request changes to edit it.';
+      if (current?.status === 'Submitted') return 'A submitted proposal is kept exactly as submitted and cannot be edited.';
+      return validateSections(v.sections);
+    },
+    // Editing approved content creates a new draft that needs owner review again.
+    adjust: (v, current, changed) => current.status === 'Approved' && changed.some(k => k === 'sections' || k === 'title')
+      ? { value: { ...v, status: 'Draft' }, events: [{ type: 'proposal.reopened', summary: 'Approved proposal edited — a new draft now needs owner review (approved version preserved)' }] }
+      : { value: v },
+  },
+  teamingPartner: {
+    validate: async v => (v.discussionStatus === 'Agreement signed' && !String(v.agreementReference).trim() ? 'Record the agreement reference before marking an agreement signed.'
+      : v.nextActionDue && !String(v.nextAction).trim() ? 'Describe the next action before setting a due date.' : null),
+  },
 };
+const uniqueViolation = (error: unknown) => /UNIQUE constraint failed/i.test(String(error));
 
 export async function findDuplicates(type: string, v: Values, excludeId = '') {
   if (type === 'organization') {
@@ -112,10 +130,14 @@ async function checkRefs(spec: TypeSpec, v: Values, changed: string[] | 'all'): 
 // ── Generic create / update ─────────────────────────────────────────────────
 
 const columnsOf = (spec: TypeSpec) => spec.fields.map(field => field.column);
-export function insertStatement(spec: TypeSpec, id: string, v: Values, at: string, requestId: string) {
+/** Insert; with `guard` (an EXISTS subquery) the row is written only if the guard matches. */
+export function insertStatement(spec: TypeSpec, id: string, v: Values, at: string, requestId: string, guard?: { sql: string; args: unknown[] }) {
   const cols = columnsOf(spec);
-  return db().prepare(`INSERT INTO ${spec.table} (id, ${cols.join(', ')}, version, created_at, updated_at, last_request_id) VALUES (?, ${cols.map(() => '?').join(', ')}, 1, ?, ?, ?)`)
-    .bind(id, ...spec.fields.map(field => toColumn(field.kind, v[field.key])), at, at, requestId);
+  const values = [id, ...spec.fields.map(field => toColumn(field.kind, v[field.key])), at, at, requestId];
+  const head = `INSERT INTO ${spec.table} (id, ${cols.join(', ')}, version, created_at, updated_at, last_request_id)`;
+  return guard
+    ? db().prepare(`${head} SELECT ?, ${cols.map(() => '?').join(', ')}, 1, ?, ?, ? WHERE EXISTS (${guard.sql})`).bind(...values, ...guard.args)
+    : db().prepare(`${head} VALUES (?, ${cols.map(() => '?').join(', ')}, 1, ?, ?, ?)`).bind(...values);
 }
 /** Version-guarded update of the given keys (all spec fields when omitted). */
 export function updateStatement(spec: TypeSpec, id: string, version: number, v: Values, at: string, requestId: string, keys?: string[]) {
@@ -132,6 +154,7 @@ export const conflict = (current: unknown) => ({ status: 409, body: { error: 'Th
 export async function createRecord(type: string, input: unknown, actor: string, opts: { confirmDistinct?: boolean; extra?: Values } = {}): Promise<StoreResult<{ record: Values }>> {
   const spec = SPECS[type];
   if (!spec) return { status: 404, body: { error: 'Unknown record type.' } };
+  if (spec.createViaAction || spec.actionOnly) return { status: 400, body: { error: `${spec.plural} are created through their workflow action.` } };
   const parsed = validateRecord(spec, input, { ...defaults(spec), ...(opts.extra ?? {}) }, 'create');
   if (!parsed.ok) return { status: 400, body: { error: parsed.error } };
   const id = crypto.randomUUID();
@@ -145,16 +168,22 @@ export async function createRecord(type: string, input: unknown, actor: string, 
     if (duplicates.length) return { status: 409, body: { error: `A matching ${spec.label.toLowerCase()} already exists. Link the existing record or confirm this one is distinct.`, duplicates } as never };
   }
   const at = nowIso(), requestId = crypto.randomUUID();
-  await db().batch([
-    insertStatement(spec, id, value, at, requestId),
-    activity(actor, at, type, id, { type: `${type}.created`, summary: `${spec.label} created${titleOf(spec, value)}` }, spec.table, requestId),
-  ]);
+  try {
+    await db().batch([
+      insertStatement(spec, id, value, at, requestId),
+      activity(actor, at, type, id, { type: `${type}.created`, summary: `${spec.label} created${titleOf(spec, value)}` }, spec.table, requestId),
+    ]);
+  } catch (error) {
+    if (uniqueViolation(error)) return { status: 409, body: { error: `This ${spec.label.toLowerCase()} already exists.` } };
+    throw error;
+  }
   return { status: 201, body: { record: (await getRecord(type, id))! } };
 }
 
 export async function updateRecord(type: string, id: string, version: unknown, changes: unknown, actor: string, opts: { confirmDistinct?: boolean } = {}): Promise<StoreResult<{ record: Values }>> {
   const spec = SPECS[type];
   if (!spec) return { status: 404, body: { error: 'Unknown record type.' } };
+  if (spec.actionOnly) return { status: 400, body: { error: `${spec.plural} change only through their workflow actions.` } };
   const current = await getRecord(type, id);
   if (!current) return { status: 404, body: { error: `${spec.label} not found.` } };
   if (!Number.isInteger(version)) return { status: 400, body: { error: 'A record version is required.' } };
@@ -163,7 +192,9 @@ export async function updateRecord(type: string, id: string, version: unknown, c
   const parsed = validateRecord(spec, changes, current, 'update');
   if (!parsed.ok) return { status: 400, body: { error: parsed.error } };
   if (!parsed.changed.length) return { status: 200, body: { record: current } };
-  const value = HOOKS[type]?.derive?.(parsed.value) ?? parsed.value;
+  const derived = HOOKS[type]?.derive?.(parsed.value) ?? parsed.value;
+  const adjusted = HOOKS[type]?.adjust?.(derived, current, parsed.changed) ?? { value: derived };
+  const value = adjusted.value;
   const refError = await checkRefs(spec, value, parsed.changed);
   if (refError) return { status: 400, body: { error: refError } };
   const ruleError = await HOOKS[type]?.validate?.(value, current);
@@ -173,10 +204,17 @@ export async function updateRecord(type: string, id: string, version: unknown, c
     if (duplicates.length) return { status: 409, body: { error: `This change matches an existing ${spec.label.toLowerCase()}. Confirm it is distinct or merge the records.`, duplicates } as never };
   }
   const at = nowIso(), requestId = crypto.randomUUID();
-  const results = await db().batch([
-    updateStatement(spec, id, current.version as number, value, at, requestId),
-    activity(actor, at, type, id, { type: `${type}.updated`, summary: `${spec.label} updated: ${parsed.changed.join(', ')}`, details: { fields: parsed.changed } }, spec.table, requestId),
-  ]);
+  let results;
+  try {
+    results = await db().batch([
+      updateStatement(spec, id, current.version as number, value, at, requestId),
+      activity(actor, at, type, id, { type: `${type}.updated`, summary: `${spec.label} updated: ${parsed.changed.join(', ')}`, details: { fields: parsed.changed } }, spec.table, requestId),
+      ...(adjusted.events ?? []).map(e => activity(actor, at, type, id, e, spec.table, requestId)),
+    ]);
+  } catch (error) {
+    if (uniqueViolation(error)) return { status: 409, body: { error: `A matching ${spec.label.toLowerCase()} already exists.` } };
+    throw error;
+  }
   if (!results[0].meta.changes) return conflict(await getRecord(type, id));
   return { status: 200, body: { record: (await getRecord(type, id))! } };
 }

@@ -3,7 +3,7 @@
 // are changed only by explicit workflow actions (lib/server/actions.ts), never by edits.
 import { isIsoDate } from './workflow';
 
-export type FieldKind = 'text' | 'longtext' | 'date' | 'enum' | 'bool' | 'ref' | 'refs' | 'url' | 'email' | 'json';
+export type FieldKind = 'text' | 'longtext' | 'date' | 'enum' | 'bool' | 'ref' | 'refs' | 'url' | 'email' | 'json' | 'int';
 export type FieldSpec = {
   key: string; column: string; label: string; kind: FieldKind;
   max?: number; options?: readonly string[]; required?: boolean; default?: unknown;
@@ -24,6 +24,10 @@ export type TypeSpec = {
   fields: FieldSpec[];
   /** Activity summaries omit the title (e.g. contact names). */
   privateTitle?: boolean;
+  /** Created only by a workflow action (generic create is rejected). */
+  createViaAction?: boolean;
+  /** Created and changed only by workflow actions (generic create and edit are rejected). */
+  actionOnly?: boolean;
 };
 
 const f = (key: string, label: string, kind: FieldKind, extra: Partial<FieldSpec> = {}): FieldSpec => ({ key, label, kind, column: key.replace(/[A-Z]/g, c => '_' + c.toLowerCase()), ...extra });
@@ -39,6 +43,48 @@ export const EVIDENCE_REVIEW_STATUSES = ['Unreviewed', 'In review', 'Verified', 
 export const EVIDENCE_STORAGE = ['Reference only', 'External link'] as const;
 /** Record types evidence can be linked to. */
 export const EVIDENCE_SUBJECTS = ['opportunity', 'requirement', 'proposal', 'project', 'deliverable', 'experience'] as const;
+
+// ── Increment 2: proposals, owner review, submissions, teaming ─────────────
+
+export const PROPOSAL_SECTIONS = [
+  { key: 'executiveSummary', label: 'Executive summary' },
+  { key: 'understanding', label: 'Understanding of the requirement' },
+  { key: 'approach', label: 'Proposed approach' },
+  { key: 'deliverables', label: 'Deliverables and milestones' },
+  { key: 'team', label: 'Team and responsibilities' },
+  { key: 'experience', label: 'Relevant experience' },
+  { key: 'assumptions', label: 'Assumptions and exclusions' },
+  { key: 'pricing', label: 'Pricing reference' },
+  { key: 'attachments', label: 'Required attachments' },
+] as const;
+/** Every section states its basis so illustrative text is never mistaken for a verified claim. */
+export const SECTION_BASIS = ['Draft text', 'Illustrative — not a verified claim', 'Verified — supported by evidence'] as const;
+/** Owner review (single-owner workspace: not an independent second reviewer). */
+export const PROPOSAL_STATUSES = ['Draft', 'Internal review', 'Changes requested', 'Approved', 'Submitted'] as const;
+export const VERSION_STATUSES = ['Internal review', 'Changes requested', 'Approved', 'Superseded', 'Submitted'] as const;
+export const SUBMISSION_METHODS = ['Procurement portal', 'Email', 'Hand delivery', 'Mail / courier', 'Other'] as const;
+export const SUBMISSION_OUTCOMES = ['Pending', 'Awarded', 'Not awarded', 'Withdrawn', 'Cancelled'] as const;
+export const PARTNER_ROLES = ['Prime', 'Subcontractor', 'Teaming partner', 'Consultant', 'Mentor'] as const;
+/** Only 'Agreement signed' (with a reference) indicates agreed participation. */
+export const DISCUSSION_STATUSES = ['Identified', 'Contacted', 'In discussion', 'Interested', 'Declined', 'Agreement drafted', 'Agreement signed'] as const;
+export type Section = { body: string; basis: string; refs: string[] };
+export type Sections = Record<string, Section>;
+
+/** Validates proposal/template section content. */
+export function validateSections(value: unknown): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'Sections are invalid.';
+  const keys = new Set<string>(PROPOSAL_SECTIONS.map(x => x.key));
+  for (const [key, section] of Object.entries(value as Record<string, unknown>)) {
+    if (!keys.has(key)) return `Unknown proposal section: ${key}.`;
+    const sec = section as Partial<Section>;
+    if (!sec || typeof sec !== 'object' || typeof sec.body !== 'string' || sec.body.length > 20000) return 'Each section needs text of 20,000 characters or fewer.';
+    if (!(SECTION_BASIS as readonly string[]).includes(String(sec.basis))) return 'Each section needs a stated basis.';
+    if (!Array.isArray(sec.refs) || sec.refs.length > 20 || !sec.refs.every(r => typeof r === 'string')) return 'Section evidence references are invalid.';
+    if (sec.basis === SECTION_BASIS[2] && !sec.refs.length) return `Link evidence for the verified section “${PROPOSAL_SECTIONS.find(x => x.key === key)?.label}”, or mark it illustrative.`;
+  }
+  return null;
+}
+export const emptySections = (): Sections => Object.fromEntries(PROPOSAL_SECTIONS.map(x => [x.key, { body: '', basis: SECTION_BASIS[0], refs: [] }]));
 
 export const SPECS: Record<string, TypeSpec> = {
   organization: {
@@ -100,6 +146,74 @@ export const SPECS: Record<string, TypeSpec> = {
       f('notes', 'Notes', 'longtext', { max: 4000 }),
     ],
   },
+  proposalTemplate: {
+    type: 'proposalTemplate', table: 'proposal_templates', label: 'Proposal template', plural: 'Proposal templates', titleKey: 'name',
+    fields: [
+      f('name', 'Template name', 'text', { max: 160, required: true }),
+      f('description', 'Description', 'longtext', { max: 2000 }),
+      f('sections', 'Sections', 'json', { readOnly: true }),
+    ],
+  },
+  proposal: {
+    type: 'proposal', table: 'proposals', label: 'Proposal', plural: 'Proposals', titleKey: 'title', createViaAction: true,
+    fields: [
+      f('opportunityId', 'Opportunity', 'ref', { ref: 'opportunity', required: true, immutable: true }),
+      f('title', 'Proposal title', 'text', { max: 200, required: true }),
+      f('owner', 'Proposal owner', 'text', { max: 120 }),
+      f('sections', 'Sections', 'json'),
+      f('status', 'Status', 'enum', { options: PROPOSAL_STATUSES, default: 'Draft', readOnly: true }),
+      f('templateId', 'Template', 'ref', { ref: 'proposalTemplate', readOnly: true }),
+      f('latestVersionId', 'Latest version', 'ref', { ref: 'proposalVersion', readOnly: true }),
+      f('approvedVersionId', 'Approved version', 'ref', { ref: 'proposalVersion', readOnly: true }),
+    ],
+  },
+  proposalVersion: {
+    type: 'proposalVersion', table: 'proposal_versions', label: 'Proposal version', plural: 'Proposal versions', titleKey: 'number', actionOnly: true,
+    fields: [
+      f('proposalId', 'Proposal', 'ref', { ref: 'proposal', readOnly: true }),
+      f('number', 'Version', 'int', { readOnly: true }),
+      f('title', 'Title', 'text', { readOnly: true }),
+      f('sections', 'Sections', 'json', { readOnly: true }),
+      f('status', 'Status', 'enum', { options: VERSION_STATUSES, readOnly: true }),
+      f('submittedBy', 'Sent for review by', 'text', { readOnly: true }),
+      f('submittedAt', 'Sent for review at', 'text', { readOnly: true }),
+      f('reviewReason', 'Review notes', 'longtext', { readOnly: true }),
+      f('reviewedBy', 'Reviewed by', 'text', { readOnly: true }),
+      f('reviewedAt', 'Reviewed at', 'text', { readOnly: true }),
+    ],
+  },
+  submission: {
+    type: 'submission', table: 'submissions', label: 'Submission record', plural: 'Submission records', titleKey: 'reference', createViaAction: true,
+    fields: [
+      f('proposalId', 'Proposal', 'ref', { ref: 'proposal', readOnly: true }),
+      f('proposalVersionId', 'Approved version', 'ref', { ref: 'proposalVersion', readOnly: true }),
+      f('opportunityId', 'Opportunity', 'ref', { ref: 'opportunity', readOnly: true }),
+      f('submittedOn', 'Submission date', 'date', { required: true }),
+      f('method', 'Method', 'enum', { options: SUBMISSION_METHODS, default: 'Procurement portal' }),
+      f('reference', 'Confirmation / reference', 'text', { max: 200 }),
+      f('notes', 'Notes', 'longtext', { max: 4000 }),
+      f('outcome', 'Outcome', 'enum', { options: SUBMISSION_OUTCOMES, default: 'Pending', readOnly: true }),
+      f('outcomeDate', 'Outcome date', 'date', { readOnly: true }),
+      f('outcomeNotes', 'Outcome notes', 'longtext', { readOnly: true }),
+      f('awardEvidenceId', 'Award evidence', 'ref', { ref: 'evidence', readOnly: true }),
+    ],
+  },
+  teamingPartner: {
+    type: 'teamingPartner', table: 'teaming_partners', label: 'Teaming partner', plural: 'Teaming partners', titleKey: 'proposedRole',
+    fields: [
+      f('opportunityId', 'Opportunity', 'ref', { ref: 'opportunity', required: true, immutable: true }),
+      f('organizationId', 'Partner organization', 'ref', { ref: 'organization', required: true }),
+      f('contactId', 'Partner contact', 'ref', { ref: 'contact', sameParent: 'organizationId' }),
+      f('proposedRole', 'Proposed role', 'enum', { options: PARTNER_ROLES, default: 'Subcontractor' }),
+      f('workPackage', 'Work package', 'longtext', { max: 2000 }),
+      f('capabilityFit', 'Capability fit', 'longtext', { max: 2000 }),
+      f('relationshipOwner', 'Relationship owner', 'text', { max: 120 }),
+      f('discussionStatus', 'Discussion status', 'enum', { options: DISCUSSION_STATUSES, default: 'Identified', hint: 'A proposed partner has not agreed to participate until an agreement is signed and referenced.' }),
+      f('nextAction', 'Next action', 'text', { max: 300 }),
+      f('nextActionDue', 'Next-action due date', 'date'),
+      f('agreementReference', 'Agreement reference', 'text', { max: 200, hint: 'e.g. signed teaming agreement or NDA reference. Required for Agreement signed.' }),
+    ],
+  },
 };
 
 // ── Validation (shared) ─────────────────────────────────────────────────────
@@ -112,7 +226,7 @@ export function defaults(spec: TypeSpec): Values {
   const out: Values = {};
   for (const field of spec.fields) {
     out[field.key] = field.default !== undefined ? field.default
-      : field.kind === 'bool' ? false : field.kind === 'refs' ? [] : field.kind === 'json' ? {} : ['date', 'ref'].includes(field.kind) ? null : '';
+      : field.kind === 'bool' ? false : field.kind === 'refs' ? [] : field.kind === 'json' ? {} : field.kind === 'int' ? 0 : ['date', 'ref'].includes(field.kind) ? null : '';
   }
   return out;
 }
@@ -159,7 +273,8 @@ function parseValue(field: FieldSpec, raw: unknown): { ok: true; value: unknown 
     case 'bool': return typeof raw === 'boolean' ? { ok: true, value: raw } : fail(`${field.label} must be true or false.`);
     case 'ref': return raw === null || raw === '' || raw === undefined ? { ok: true, value: null } : typeof raw === 'string' && raw.length <= 100 ? { ok: true, value: raw } : fail(`${field.label} is invalid.`);
     case 'refs': return Array.isArray(raw) && raw.length <= 50 && raw.every(v => typeof v === 'string' && v.length <= 100) ? { ok: true, value: [...new Set(raw as string[])] } : fail(`${field.label} is invalid.`);
-    case 'json': return raw && typeof raw === 'object' && JSON.stringify(raw).length <= 60000 ? { ok: true, value: raw } : fail(`${field.label} is invalid.`);
+    case 'json': return raw && typeof raw === 'object' && JSON.stringify(raw).length <= 200000 ? { ok: true, value: raw } : fail(`${field.label} is invalid.`);
+    case 'int': return Number.isInteger(raw) ? { ok: true, value: raw } : fail(`${field.label} must be a whole number.`);
   }
 }
 
@@ -198,4 +313,28 @@ export function requirementSummary(requirements: Values[], evidenceById: Map<str
     open: mandatory.filter(r => !['Met', 'Not met', 'Not applicable'].includes(r.status as string)).length,
     weakEvidence: requirements.filter(r => linked(r.id as string).some(e => evidenceState(e, today) !== 'current')).length,
   };
+}
+
+// ── Proposal export (Markdown; the UI also offers printable HTML) ───────────
+
+export type ProposalDocumentInput = {
+  title: string; opportunityTitle: string; organization?: string; sections: Sections;
+  /** Exporting the exact approved/submitted version, or the working draft. */
+  version?: { number: number; status: string; reviewedAt?: string } | null;
+  evidenceTitles?: Record<string, string>;
+};
+export function proposalDocument(input: ProposalDocumentInput): string {
+  const approved = input.version && ['Approved', 'Submitted'].includes(input.version.status);
+  const lines = [`# ${input.title}`, '', `Opportunity: ${input.opportunityTitle}${input.organization ? ` — ${input.organization}` : ''}`, ''];
+  lines.push(approved
+    ? `> Version ${input.version!.number} — ${input.version!.status}. Approved by the workspace owner (owner review; not an independent second review)${input.version!.reviewedAt ? ` on ${input.version!.reviewedAt.slice(0, 10)}` : ''}.`
+    : `> **DRAFT — not approved for submission.**${input.version ? ` Version ${input.version.number} (${input.version.status}).` : ' Working copy.'}`);
+  lines.push('', '> Sections marked “Illustrative” describe intended work and are not verified claims of qualifications, registrations, certifications or past performance.', '');
+  for (const { key, label } of PROPOSAL_SECTIONS) {
+    const section = input.sections[key] ?? { body: '', basis: SECTION_BASIS[0], refs: [] };
+    lines.push(`## ${label}`, '', `_Basis: ${section.basis}_`, '', section.body.trim() || '_[Not yet written]_', '');
+    if (section.refs.length) lines.push('Supporting evidence: ' + section.refs.map(r => input.evidenceTitles?.[r] ?? r).join('; '), '');
+  }
+  lines.push('---', 'Prepared in the EduRadius workspace. Recording a submission in the workspace does not submit anything externally.');
+  return lines.join('\n');
 }

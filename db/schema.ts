@@ -170,3 +170,73 @@ export const evidenceLinks = sqliteTable('evidence_links', {
   subjectId: text('subject_id').notNull(),
   createdAt: text('created_at').notNull(),
 }, t => [uniqueIndex('evidence_links_uq').on(t.evidenceId, t.subjectType, t.subjectId), index('evidence_links_subject_idx').on(t.subjectType, t.subjectId)]);
+
+// ── Proposals, owner review, submissions, teaming (migration 0004) ──
+export const proposalTemplates = sqliteTable('proposal_templates', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  description: text('description').notNull().default(''),
+  sections: text('sections').notNull().default('{}'),
+  ...recordColumns(),
+});
+
+export const proposals = sqliteTable('proposals', {
+  id: text('id').primaryKey(),
+  opportunityId: text('opportunity_id').notNull(),
+  title: text('title').notNull(),
+  owner: text('owner').notNull().default(''),
+  sections: text('sections').notNull().default('{}'),
+  status: text('status').notNull().default('Draft'),
+  templateId: text('template_id'),
+  latestVersionId: text('latest_version_id'),
+  approvedVersionId: text('approved_version_id'),
+  ...recordColumns(),
+}, t => [index('proposals_opportunity_idx').on(t.opportunityId)]);
+
+// Immutable snapshots: content is never edited after a version is created.
+export const proposalVersions = sqliteTable('proposal_versions', {
+  id: text('id').primaryKey(),
+  proposalId: text('proposal_id').notNull(),
+  number: integer('number').notNull(),
+  title: text('title').notNull().default(''),
+  sections: text('sections').notNull(),
+  status: text('status').notNull(),
+  submittedBy: text('submitted_by').notNull().default(''),
+  submittedAt: text('submitted_at').notNull().default(''),
+  reviewReason: text('review_reason').notNull().default(''),
+  reviewedBy: text('reviewed_by').notNull().default(''),
+  reviewedAt: text('reviewed_at').notNull().default(''),
+  ...recordColumns(),
+}, t => [uniqueIndex('proposal_versions_number_uq').on(t.proposalId, t.number)]);
+
+export const submissions = sqliteTable('submissions', {
+  id: text('id').primaryKey(),
+  proposalId: text('proposal_id').notNull(),
+  proposalVersionId: text('proposal_version_id').notNull(),
+  opportunityId: text('opportunity_id').notNull(),
+  submittedOn: text('submitted_on'),
+  method: text('method').notNull().default('Procurement portal'),
+  reference: text('reference').notNull().default(''),
+  notes: text('notes').notNull().default(''),
+  outcome: text('outcome').notNull().default('Pending'),
+  outcomeDate: text('outcome_date'),
+  outcomeNotes: text('outcome_notes').notNull().default(''),
+  awardEvidenceId: text('award_evidence_id'),
+  ...recordColumns(),
+}, t => [uniqueIndex('submissions_version_uq').on(t.proposalVersionId), index('submissions_opportunity_idx').on(t.opportunityId)]);
+
+export const teamingPartners = sqliteTable('teaming_partners', {
+  id: text('id').primaryKey(),
+  opportunityId: text('opportunity_id').notNull(),
+  organizationId: text('organization_id').notNull(),
+  contactId: text('contact_id'),
+  proposedRole: text('proposed_role').notNull().default('Subcontractor'),
+  workPackage: text('work_package').notNull().default(''),
+  capabilityFit: text('capability_fit').notNull().default(''),
+  relationshipOwner: text('relationship_owner').notNull().default(''),
+  discussionStatus: text('discussion_status').notNull().default('Identified'),
+  nextAction: text('next_action').notNull().default(''),
+  nextActionDue: text('next_action_due'),
+  agreementReference: text('agreement_reference').notNull().default(''),
+  ...recordColumns(),
+}, t => [uniqueIndex('teaming_partner_uq').on(t.opportunityId, t.organizationId)]);

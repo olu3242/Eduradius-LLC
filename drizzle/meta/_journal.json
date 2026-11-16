@@ -29,6 +29,13 @@
       "when": 1794804962735,
       "tag": "0003_contracting_records",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1794805578345,
+      "tag": "0004_proposals_and_teaming",
+      "breakpoints": true
     }
   ]
 }

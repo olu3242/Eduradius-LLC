@@ -1,6 +1,7 @@
 // Explicit, transactional workflow actions dispatched by POST /api/actions/:name.
 // Generic edits (records-store) never change workflow-controlled fields; these do.
-import { SPECS, EVIDENCE_SUBJECTS, organizationKey, emailKey, websiteDomain, type Values } from '../records';
+import { SPECS, EVIDENCE_SUBJECTS, SECTION_BASIS, SUBMISSION_METHODS, SUBMISSION_OUTCOMES, emptySections, evidenceState, organizationKey, emailKey, websiteDomain, validateSections, type Sections, type Values } from '../records';
+import { businessDate, isIsoDate } from '../workflow';
 import { activityStatement, type StoreResult } from './workflow-store';
 import { db, nowIso, getRecord, recordExists, tableFor, activity, conflict, insertStatement } from './records-store';
 
@@ -12,8 +13,8 @@ const isVersion = (v: unknown): v is number => Number.isInteger(v);
 type Row = Record<string, unknown>;
 
 /** Columns that reference organizations/contacts; merges move every reference. Extended per increment. */
-export const ORGANIZATION_REFS: [string, string][] = [['contacts', 'organization_id'], ['inquiries', 'organization_id'], ['opportunities', 'organization_id']];
-export const CONTACT_REFS: [string, string][] = [['inquiries', 'contact_id'], ['opportunities', 'contact_id']];
+export const ORGANIZATION_REFS: [string, string][] = [['contacts', 'organization_id'], ['inquiries', 'organization_id'], ['opportunities', 'organization_id'], ['teaming_partners', 'organization_id']];
+export const CONTACT_REFS: [string, string][] = [['inquiries', 'contact_id'], ['opportunities', 'contact_id'], ['teaming_partners', 'contact_id']];
 
 // ── Evidence links ──────────────────────────────────────────────────────────
 
@@ -47,14 +48,18 @@ async function merge(type: 'organization' | 'contact', body: Body, actor: string
   const conflicts = compare.filter(k => source[k] && target[k] && source[k] !== target[k]);
   const at = nowIso(), requestId = crypto.randomUUID();
   const refs = type === 'organization' ? ORGANIZATION_REFS : CONTACT_REFS;
-  const results = await db().batch([
+  let results;
+  try { results = await db().batch([
     db().prepare(`UPDATE ${spec.table} SET status = 'Merged', merged_into_id = ?, version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND version = ? AND status = 'Active'`)
       .bind(targetId, at, requestId, sourceId, source.version),
     ...refs.map(([table, column]) => db().prepare(`UPDATE ${table} SET ${column} = ?, version = version + 1, updated_at = ? WHERE ${column} = ? AND EXISTS (SELECT 1 FROM ${spec.table} WHERE id = ? AND last_request_id = ?)`)
       .bind(targetId, at, sourceId, sourceId, requestId)),
     activity(actor, at, type, sourceId, { type: `${type}.merged`, summary: `${spec.label} merged into another record`, details: { targetId, conflicts } }, spec.table, requestId),
     activityStatement(actor, at, type, targetId, { type: `${type}.merge_received`, summary: `${spec.label} received merged references`, details: { sourceId, conflicts } }, `SELECT 1 FROM ${spec.table} WHERE id = ? AND last_request_id = ?`, [sourceId, requestId]),
-  ]);
+  ]); } catch (error) {
+    if (/UNIQUE constraint failed/i.test(String(error))) return bad('Both records are partners on the same opportunity. Remove one teaming record before merging.', 409);
+    throw error;
+  }
   if (!results[0].meta.changes) return conflict(await getRecord(type, sourceId));
   return { status: 200, body: { target: await getRecord(type, targetId), source: await getRecord(type, sourceId), conflicts } };
 }
@@ -124,7 +129,160 @@ async function linkParty(table: 'inquiries' | 'opportunities', subjectType: stri
   return results[0].meta.changes ? { status: 200, body: { organizationId, contactId } } : conflict(null);
 }
 
+// ── Proposals: owner review, versions, submission records ──────────────────
+
+const proposalGuard = 'SELECT 1 FROM proposals WHERE id = ? AND last_request_id = ?';
+const reviewerLabel = (actor: string) => `${actor} (owner review)`;
+async function loadProposal(body: Body) {
+  const proposal = await getRecord('proposal', str(body.id));
+  if (!proposal) return { error: bad('Proposal not found.', 404) };
+  if (!isVersion(body.version) || proposal.version !== body.version) return { error: conflict(proposal) };
+  return { proposal };
+}
+
+async function createProposal(body: Body, actor: string): Promise<StoreResult<unknown>> {
+  const opportunityId = str(body.opportunityId), title = str(body.title).trim();
+  if (!(await recordExists('opportunity', opportunityId))) return bad('Opportunity not found.', 404);
+  if (!title || title.length > 200) return bad('Proposal title is required (200 characters or fewer).');
+  const sections: Sections = emptySections();
+  let templateId: string | null = null;
+  if (body.templateId) {
+    const template = await getRecord('proposalTemplate', str(body.templateId));
+    if (!template) return bad('Template not found.', 404);
+    templateId = String(template.id);
+    // Copies template text into a NEW proposal; existing proposals are never overwritten.
+    for (const [key, section] of Object.entries((template.sections ?? {}) as Sections)) if (key in sections) sections[key] = { body: String(section.body ?? ''), basis: SECTION_BASIS[0], refs: [] };
+  }
+  const id = crypto.randomUUID(), at = nowIso(), requestId = crypto.randomUUID();
+  await db().batch([
+    insertStatement(SPECS.proposal, id, { opportunityId, title, owner: str(body.owner).slice(0, 120), sections, status: 'Draft', templateId, latestVersionId: null, approvedVersionId: null }, at, requestId),
+    activity(actor, at, 'proposal', id, { type: 'proposal.created', summary: `Proposal created${templateId ? ' from a template' : ''}: ${title.slice(0, 120)}` }, 'proposals', requestId),
+  ]);
+  return { status: 201, body: { record: await getRecord('proposal', id) } };
+}
+
+async function submitForReview(body: Body, actor: string): Promise<StoreResult<unknown>> {
+  const { proposal, error } = await loadProposal(body); if (error) return error;
+  if (!['Draft', 'Changes requested'].includes(String(proposal!.status))) return bad(`A proposal in ${proposal!.status} cannot be sent for owner review.`, 409);
+  const sections = proposal!.sections as Sections;
+  const invalid = validateSections(sections); if (invalid) return bad(invalid);
+  if (!sections.executiveSummary?.body.trim()) return bad('Write the executive summary before sending the proposal for owner review.');
+  const max = await db().prepare('SELECT COALESCE(MAX(number), 0) AS n FROM proposal_versions WHERE proposal_id = ?').bind(proposal!.id).first<{ n: number }>();
+  const number = Number(max?.n ?? 0) + 1, versionId = crypto.randomUUID(), at = nowIso(), requestId = crypto.randomUUID();
+  const results = await db().batch([
+    db().prepare("UPDATE proposals SET status = 'Internal review', latest_version_id = ?, version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND version = ? AND status IN ('Draft', 'Changes requested')").bind(versionId, at, requestId, proposal!.id, proposal!.version),
+    insertStatement(SPECS.proposalVersion, versionId, { proposalId: proposal!.id, number, title: proposal!.title, sections, status: 'Internal review', submittedBy: actor, submittedAt: at, reviewReason: '', reviewedBy: '', reviewedAt: '' }, at, requestId, { sql: proposalGuard, args: [proposal!.id, requestId] }),
+    activity(actor, at, 'proposal', String(proposal!.id), { type: 'proposal.review_requested', summary: `Version ${number} sent for owner review`, details: { versionId, number } }, 'proposals', requestId),
+  ]);
+  return results[0].meta.changes ? { status: 200, body: { record: await getRecord('proposal', String(proposal!.id)), versionId } } : conflict(await getRecord('proposal', String(proposal!.id)));
+}
+
+async function reviewProposal(body: Body, actor: string, decision: 'approve' | 'changes'): Promise<StoreResult<unknown>> {
+  const { proposal, error } = await loadProposal(body); if (error) return error;
+  if (proposal!.status !== 'Internal review' || !proposal!.latestVersionId) return bad('Only a proposal in owner review can be approved or returned for changes.', 409);
+  const reason = str(body.reason).trim();
+  if (decision === 'changes' && !reason) return bad('Record what needs to change.');
+  if (reason.length > 4000) return bad('Review notes must be 4,000 characters or fewer.');
+  const versionId = String(proposal!.latestVersionId);
+  if (decision === 'approve') {
+    const version = await getRecord('proposalVersion', versionId);
+    const today = businessDate(), problems: string[] = [];
+    for (const [key, section] of Object.entries((version?.sections ?? {}) as Sections)) {
+      if (section.basis !== SECTION_BASIS[2]) continue;
+      for (const ref of section.refs) { const e = await getRecord('evidence', ref); if (!e || evidenceState(e, today) !== 'current') problems.push(key); }
+    }
+    if (problems.length) return bad(`Verified sections must cite verified, unexpired evidence: ${[...new Set(problems)].join(', ')}.`);
+  }
+  const at = nowIso(), requestId = crypto.randomUUID();
+  const statements = decision === 'approve' ? [
+    db().prepare("UPDATE proposals SET status = 'Approved', approved_version_id = ?, version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND version = ? AND status = 'Internal review'").bind(versionId, at, requestId, proposal!.id, proposal!.version),
+    db().prepare(`UPDATE proposal_versions SET status = 'Superseded', version = version + 1, updated_at = ? WHERE proposal_id = ? AND status = 'Approved' AND id <> ? AND EXISTS (${proposalGuard})`).bind(at, proposal!.id, versionId, proposal!.id, requestId),
+    db().prepare(`UPDATE proposal_versions SET status = 'Approved', review_reason = ?, reviewed_by = ?, reviewed_at = ?, version = version + 1, updated_at = ? WHERE id = ? AND EXISTS (${proposalGuard})`).bind(reason, reviewerLabel(actor), at, at, versionId, proposal!.id, requestId),
+    activity(actor, at, 'proposal', String(proposal!.id), { type: 'proposal.approved', summary: 'Proposal approved by the workspace owner (owner review)', details: { versionId } }, 'proposals', requestId),
+  ] : [
+    db().prepare("UPDATE proposals SET status = 'Changes requested', version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND version = ? AND status = 'Internal review'").bind(at, requestId, proposal!.id, proposal!.version),
+    db().prepare(`UPDATE proposal_versions SET status = 'Changes requested', review_reason = ?, reviewed_by = ?, reviewed_at = ?, version = version + 1, updated_at = ? WHERE id = ? AND EXISTS (${proposalGuard})`).bind(reason, reviewerLabel(actor), at, at, versionId, proposal!.id, requestId),
+    activity(actor, at, 'proposal', String(proposal!.id), { type: 'proposal.changes_requested', summary: 'Owner review requested changes', details: { versionId, reason: reason.slice(0, 200) } }, 'proposals', requestId),
+  ];
+  const results = await db().batch(statements);
+  return results[0].meta.changes ? { status: 200, body: { record: await getRecord('proposal', String(proposal!.id)) } } : conflict(await getRecord('proposal', String(proposal!.id)));
+}
+
+/** Records (does not perform) a submission of the exact approved version. */
+async function recordSubmission(body: Body, actor: string): Promise<StoreResult<unknown>> {
+  const { proposal, error } = await loadProposal(body); if (error) return error;
+  if (proposal!.status !== 'Approved' || !proposal!.approvedVersionId || proposal!.approvedVersionId !== proposal!.latestVersionId) return bad('Only the current owner-approved version can be recorded as submitted.', 409);
+  if (!isIsoDate(body.submittedOn)) return bad('Submission date is required.');
+  if (!(SUBMISSION_METHODS as readonly unknown[]).includes(body.method)) return bad('Choose how the proposal was submitted.');
+  const reference = str(body.reference).trim(), notes = str(body.notes).trim();
+  if (reference.length > 200 || notes.length > 4000) return bad('Reference or notes are too long.');
+  const id = crypto.randomUUID(), at = nowIso(), requestId = crypto.randomUUID(), versionId = String(proposal!.approvedVersionId);
+  try {
+    const results = await db().batch([
+      db().prepare("UPDATE proposals SET status = 'Submitted', version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND version = ? AND status = 'Approved' AND approved_version_id = ?").bind(at, requestId, proposal!.id, proposal!.version, versionId),
+      insertStatement(SPECS.submission, id, { proposalId: proposal!.id, proposalVersionId: versionId, opportunityId: proposal!.opportunityId, submittedOn: body.submittedOn, method: body.method, reference, notes, outcome: 'Pending', outcomeDate: null, outcomeNotes: '', awardEvidenceId: null }, at, requestId, { sql: proposalGuard, args: [proposal!.id, requestId] }),
+      db().prepare(`UPDATE proposal_versions SET status = 'Submitted', version = version + 1, updated_at = ? WHERE id = ? AND EXISTS (${proposalGuard})`).bind(at, versionId, proposal!.id, requestId),
+      activity(actor, at, 'proposal', String(proposal!.id), { type: 'proposal.submission_recorded', summary: `Submission recorded (${String(body.method)}) — nothing was sent from this workspace`, details: { submissionId: id, versionId } }, 'proposals', requestId),
+    ]);
+    if (!results[0].meta.changes) return conflict(await getRecord('proposal', String(proposal!.id)));
+  } catch (e) {
+    if (/UNIQUE constraint failed/i.test(String(e))) return bad('A submission is already recorded for this approved version.', 409);
+    throw e;
+  }
+  return { status: 201, body: { record: await getRecord('submission', id) } };
+}
+
+/** Manual outcome. "Awarded" needs explicit confirmation, a date and award evidence. */
+async function recordOutcome(body: Body, actor: string): Promise<StoreResult<unknown>> {
+  const submission = await getRecord('submission', str(body.id));
+  if (!submission) return bad('Submission record not found.', 404);
+  if (!isVersion(body.version) || submission.version !== body.version) return conflict(submission);
+  const outcome = str(body.outcome);
+  if (!(SUBMISSION_OUTCOMES as readonly string[]).includes(outcome)) return bad('Choose an outcome.');
+  const locked = await db().prepare('SELECT 1 AS found FROM projects WHERE submission_id = ?').bind(submission.id).first().catch(() => null);
+  if (locked) return bad('A project was created from this award; the outcome is kept as recorded.', 409);
+  const outcomeDate = body.outcomeDate ? str(body.outcomeDate) : null, outcomeNotes = str(body.outcomeNotes).trim();
+  if (outcomeDate && !isIsoDate(outcomeDate)) return bad('Outcome date must be a valid date.');
+  if (outcomeNotes.length > 4000) return bad('Outcome notes are too long.');
+  let awardEvidenceId: string | null = null;
+  if (outcome === 'Awarded') {
+    if (body.confirmAward !== true) return bad('Confirm that the award was received in writing before recording it.');
+    if (!outcomeDate) return bad('Record the award date.');
+    const evidence = body.awardEvidenceId ? await getRecord('evidence', str(body.awardEvidenceId)) : null;
+    if (!evidence || ['Rejected', 'Superseded'].includes(String(evidence.reviewStatus))) return bad('Link the award notice or contract as evidence.');
+    awardEvidenceId = String(evidence.id);
+  }
+  const at = nowIso(), requestId = crypto.randomUUID();
+  const results = await db().batch([
+    db().prepare('UPDATE submissions SET outcome = ?, outcome_date = ?, outcome_notes = ?, award_evidence_id = ?, version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND version = ?').bind(outcome, outcomeDate, outcomeNotes, awardEvidenceId, at, requestId, submission.id, submission.version),
+    ...(awardEvidenceId ? [db().prepare(`INSERT OR IGNORE INTO evidence_links (id, evidence_id, subject_type, subject_id, created_at) SELECT ?, ?, 'opportunity', ?, ? WHERE EXISTS (SELECT 1 FROM submissions WHERE id = ? AND last_request_id = ?)`).bind(crypto.randomUUID(), awardEvidenceId, submission.opportunityId, at, submission.id, requestId)] : []),
+    activity(actor, at, 'submission', String(submission.id), { type: 'submission.outcome_recorded', summary: `Outcome recorded: ${outcome}`, details: { outcome, awardEvidenceId } }, 'submissions', requestId),
+  ]);
+  return results[0].meta.changes ? { status: 200, body: { record: await getRecord('submission', String(submission.id)) } } : conflict(await getRecord('submission', String(submission.id)));
+}
+
+async function saveTemplate(body: Body, actor: string): Promise<StoreResult<unknown>> {
+  const proposal = await getRecord('proposal', str(body.id));
+  if (!proposal) return bad('Proposal not found.', 404);
+  const name = str(body.name).trim();
+  if (!name || name.length > 160) return bad('Template name is required (160 characters or fewer).');
+  const sections = Object.fromEntries(Object.entries(proposal.sections as Sections).map(([k, v]) => [k, { body: v.body, basis: SECTION_BASIS[0], refs: [] }]));
+  const id = crypto.randomUUID(), at = nowIso(), requestId = crypto.randomUUID();
+  await db().batch([
+    insertStatement(SPECS.proposalTemplate, id, { name, description: str(body.description).slice(0, 2000), sections }, at, requestId),
+    activity(actor, at, 'proposalTemplate', id, { type: 'proposalTemplate.created', summary: `Template saved: ${name.slice(0, 120)}` }, 'proposal_templates', requestId),
+  ]);
+  return { status: 201, body: { record: await getRecord('proposalTemplate', id) } };
+}
+
 export const ACTIONS: Record<string, Action> = {
+  'proposal.create': createProposal,
+  'proposal.submitForReview': submitForReview,
+  'proposal.approve': (b, a) => reviewProposal(b, a, 'approve'),
+  'proposal.requestChanges': (b, a) => reviewProposal(b, a, 'changes'),
+  'proposal.recordSubmission': recordSubmission,
+  'proposal.saveTemplate': saveTemplate,
+  'submission.recordOutcome': recordOutcome,
   'evidence.link': (b, a) => linkEvidence(b, a),
   'evidence.unlink': (b, a) => linkEvidence(b, a, true),
   'organization.merge': (b, a) => merge('organization', b, a),
