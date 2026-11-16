@@ -68,3 +68,40 @@ Images are illustrative AI-generated concepts, not verified clients, team, facil
 
 ## Import provenance and validation
 Imported from published Site source commit `c94dec275b4be820cc1eb2725dd57f8a48613290`. TypeScript and production build passed before publication; the lifecycle layout and website-asset download were checked in preview. This repository import preserves application behavior and adds repository-specific documentation.
+
+## Pull-request validation
+
+Use **Node.js 24** for the checked-in test harness (Node's module hooks, native
+TypeScript stripping, and SQLite adapter) and the pinned **pnpm 11.25.0**.
+
+```sh
+pnpm install --frozen-lockfile
+pnpm exec tsc --noEmit
+pnpm lint
+pnpm test
+pnpm build
+pnpm test:worker
+```
+
+`pnpm test` runs the production route handlers and access helpers with an isolated
+Worker environment. Both production SQL migrations run against in-memory SQLite;
+only the D1 transport interface is adapted. It covers owner access, signed
+sessions, CSRF checks, public-data projection, append-only intake, rate limits,
+optimistic concurrency, and streaming UTF-8 request size limits.
+
+`pnpm test:worker` runs the built Worker through local Wrangler using temporary
+D1 state and test-only authentication values. It verifies the public and workspace
+routes, token sign-in, intake persistence, save/reload, private-data exclusion,
+oversize-request recovery, and fail-closed access with no valid auth mode. The
+temporary servers and databases are cleaned up afterward. These are HTTP smoke
+tests, not browser interaction or hosted deployment certification.
+
+`.github/workflows/ci.yml` runs these checks on pull requests and pushes to `main`.
+It does not deploy or connect to a live database. Browser checks previously
+reported in the PR description are separate from this reproducible test suite.
+
+The existing direct-image lint advisories remain warnings; authored application
+code must pass all lint error rules. Public content uses an explicit field
+allowlist, including `siteContent`; private or newly added fields are not
+implicitly published. Request-body limits are enforced while streaming, in UTF-8
+bytes, before parsing JSON.

@@ -48,7 +48,25 @@ export async function sha256Hex(value: string) {
 
 /** Reads a JSON body with a hard size cap. Returns null for oversize or malformed bodies. */
 export async function readJson<T>(request: Request, maxBytes: number): Promise<T | null | 'too_large'> {
-  const raw = await request.text();
-  if (raw.length > maxBytes) return 'too_large';
-  try { return JSON.parse(raw) as T; } catch { return null; }
+  if (!request.body) return null;
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel();
+        return 'too_large';
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as T;
+  } catch { return null; }
+  finally { reader.releaseLock(); }
 }
