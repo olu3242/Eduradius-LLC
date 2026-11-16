@@ -42,7 +42,9 @@ test('pages have a bounded default and maximum size and walk the whole set exact
   await orgs(60);
   const first = await page('organization');
   assert.equal(first.items.length, 25); assert.equal(first.page.limit, 25); assert.equal(first.page.total, 60); assert.equal(first.page.hasMore, true);
-  assert.equal(first.items[0].name, 'Org 059', 'default sort is newest first');
+  // Newest first; records created in the same millisecond are ordered by id (the tie-breaker).
+  assert.equal(first.items[0].name, (await rows('SELECT name FROM organizations ORDER BY created_at DESC, id DESC LIMIT 1'))[0].name, 'default sort is newest first');
+  assert.ok(['Org 059', 'Org 058', 'Org 057'].includes(first.items[0].name));
   const { items, pages } = await all('organization', '', 25);
   assert.equal(pages, 3); assert.equal(items.length, 60);
   assert.equal(new Set(items.map(o => o.id)).size, 60, 'no duplicates across pages');
