@@ -18,7 +18,7 @@ Earlier stages are described in [WORKFLOW.md](WORKFLOW.md) (inquiries, conversio
 
 | Route | Purpose |
 | --- | --- |
-| `GET /api/workflow[?activity=all]` | All records by type (`records`), `evidenceLinks`, plus Stage 1–2 data |
+| `GET /api/records/:type`, `GET /api/context/:type/:id`, `GET /api/export` | Paged records, a detail view's related records, and the complete export ([API.md](API.md)). `GET /api/workflow` no longer returns record collections |
 | `POST /api/records/:type` | Create a record (types that allow generic create) |
 | `PATCH /api/records/:type/:id` | `{ version, changes }` edit; read-only fields rejected |
 | `POST /api/actions/:name` | Workflow action (table below) |

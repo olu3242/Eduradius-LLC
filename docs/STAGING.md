@@ -43,10 +43,13 @@ Back up the database before migrating (staging starts empty, but rehearse the pr
 npx wrangler d1 export eduradius-staging --remote --output staging-before-$BUILD_COMMIT.sql
 ```
 
-Apply every migration in order, then set the secret and deploy:
+Inspect the database, apply exactly the files the status check lists (all of 0000–0007 for a new, empty database), confirm, then set the secret and deploy:
 
 ```sh
-for f in drizzle/0*.sql; do npx wrangler d1 execute eduradius-staging --remote --config dist/server/wrangler.staging.json --file "$f"; done
+npx wrangler d1 execute eduradius-staging --remote --json --config dist/server/wrangler.staging.json --command "$(node scripts/migration-status.mjs --print-query)" > schema.json
+node scripts/migration-status.mjs --wrangler-json schema.json --empty-database-ok   # lists the files to apply
+for f in <files listed above>; do npx wrangler d1 execute eduradius-staging --remote --config dist/server/wrangler.staging.json --file "drizzle/$f"; done
+# re-run the two status commands and expect: Up to date
 npx wrangler secret put WORKSPACE_ACCESS_TOKEN --config dist/server/wrangler.staging.json   # paste a fresh 32+ char value
 npx wrangler deploy --config dist/server/wrangler.staging.json
 ```
@@ -66,19 +69,28 @@ STAGING_BASE_URL=https://<staging-host> STAGING_CONFIRM_HOST=<staging-host> \
 BASE=https://<staging-host> node tests/browser/contracting-journey.mjs   # needs token sign-in adaptation; see below
 ```
 
-`staging-certify.mjs` checks 36 things through HTTP:
+`staging-certify.mjs` checks 48 things through HTTP:
 
 - **Health:** liveness, readiness and build identity.
 - **Access boundaries:** anonymous access, forged Sites headers, invalid bearer and tampered cookie are all denied on private routes; cross-origin and anonymous writes are rejected.
 - **Public intake:** internal fields are rejected and the response makes no email claim.
 - **Owner journey:** review, stale-version and invalid-transition rejection, qualification, concurrent conversion, requirement rules, proposal review and revision, the submission-before-approval guard, award with evidence, the project-before-award guard, concurrent project creation, client acceptance rules, an approved change, the closeout guard and completion, and a private experience record.
 - **Persistence and exposure:** records persist across a new session, and the public site excludes them.
+- **Bounded reads:** lists return bounded pages with a working cursor, invalid limits and cursors are rejected, reports are computed on the server, and the export manifest matches every collection. The access-boundary checks also cover `/api/records/inquiry` and `/api/export`.
 
 The browser journeys use the loopback mock sign-in and run only against a local dev server. On a token-mode staging host, sign in through the workspace dialog. On an isolated Site, use Sign in with ChatGPT; the browser steps are otherwise unchanged.
 
 ## Local rehearsal (performed)
 
-Against the **built Worker** (`wrangler dev` on the production bundle) with a freshly migrated database (0000–0006) and token mode, the certification script passed 36/36. Its output and the Worker logs contained neither the token nor the synthetic contact details. The staging config was generated and passed `wrangler deploy --dry-run`: 1,137 KiB upload (316 KiB gzipped), with bindings `DB` (staging D1) and `WORKSPACE_AUTH_MODE=token`. This is a rehearsal, **not hosted certification**.
+**Candidate `af555c9`.** The run used the **built Worker** (`wrangler dev` on the production bundle), a database freshly migrated with 0000–0007, token mode and a throwaway local token:
+
+- the certification script passed **48/48**;
+- the reported build `af555c9e97bd` matched the candidate;
+- the token and the synthetic contact email appeared in neither the output nor the Worker log.
+
+A generated staging config passed `wrangler deploy --dry-run`: 1,185.38 KiB upload (329.46 KiB gzipped), with bindings `DB` (staging D1) and `WORKSPACE_AUTH_MODE=token`. This is a rehearsal, **not hosted certification**.
+
+**Previous candidate `36ce7a1` (historical).** Against the **built Worker** (`wrangler dev` on the production bundle) with a freshly migrated database (0000–0006) and token mode, the certification script passed 36/36. Its output and the Worker logs contained neither the token nor the synthetic contact details. The staging config was generated and passed `wrangler deploy --dry-run`: 1,137 KiB upload (316 KiB gzipped), with bindings `DB` (staging D1) and `WORKSPACE_AUTH_MODE=token`. This is a rehearsal, **not hosted certification**.
 
 ## Teardown
 

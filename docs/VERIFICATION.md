@@ -112,3 +112,32 @@ Results for the candidate, including the requirements-to-evidence matrix, accept
 - Empty-database, earliest-version and interrupted-transaction migration tests pass, and local backup/restore is verified.
 
 Hosted staging is **not certified**: no authorized isolated target exists ([STAGING.md](STAGING.md)).
+
+## Iteration 6: dependencies, pagination and recovery (candidate `af555c9`, local only)
+
+Environment: Linux container, Node 22.23.4, pnpm 11.25.0, Wrangler 4.92.0, Chromium (Playwright), local Miniflare D1. No hosted environment, live database or runtime setting was used or changed.
+
+| Check | Commit | Result |
+| --- | --- | --- |
+| Dependency audit before / after | `e07844b` → `55bb85c` | prod 23 → 0; all 86 → 4 (dev/build only); [DEPENDENCIES.md](DEPENDENCIES.md) |
+| tsc, lint, 96 tests, build, worker smoke, journeys 30/30 and 27/27 on the upgraded dependencies | `55bb85c` | pass |
+| Type check, lint (0 errors), `pnpm test` 115/115, build, `pnpm test:worker` 2/2 | `af555c9` | pass |
+| Certification rehearsal against the built Worker (fresh 0000–0007, token mode) | `af555c9` | 48/48; build matched; no token or email in output or logs |
+| Staging dry-run deploy | `af555c9` | 1,185.38 KiB (329.46 KiB gzipped) |
+| Browser: `journey.mjs` (legacy document) | `af555c9` | 30/30 |
+| Browser: `contracting-journey.mjs` | `af555c9` | 27/27 in 5 of 6 runs; one aborted run not reproduced (K11) |
+| Browser: `pagination-ui.mjs`, `volume.mjs` (synthetic dataset) | `af555c9` | 16/16, 14/14 |
+| Before/after measurements, same dataset | `e07844b` vs `af555c9` | [PERFORMANCE.md](PERFORMANCE.md) |
+| Migration status: local file, and Wrangler `--json` output from the local D1 | `af555c9` | correct on 0007-applied and 0006 databases. A `pragma_table_info` query was found to be refused by D1 (`SQLITE_AUTH`), so the tool reads only `sqlite_master` and fails closed on errors |
+| Backup with `wrangler d1 export --local`, restore into an empty state | `af555c9` | owner export identical before and after |
+| Previous candidate on this release's data | `e07844b` code, `af555c9` data | identical records; contracting journey 27/27 |
+| Code-only v5 rollback after the import (original v5 handler from `2af4266`) | — | v5 sees no requests or opportunities; its save returns 400 |
+| v5 rollback with `scripts/recovery/legacy-document.mjs`, then forward | `af555c9` | v5 read and saved (200); forward import added only the v5-period request; no duplicates; contracting records identical |
+
+Defects found and fixed during this iteration:
+
+- the evidence `state=usable`/`rejected` filters bound an unused parameter (D1 rejected the query);
+- `__proto__` as a list type returned 503 instead of 404;
+- the summary carried full opportunity notes;
+- every evidence picker loaded on mount (32 requests when opening a pursuit);
+- the migration status tool advised applying every file when given a failed query result.

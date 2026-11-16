@@ -99,7 +99,7 @@ Activity summaries never include contact details or note contents. Opportunity u
 
 | Method & path | Body | Result |
 | --- | --- | --- |
-| `GET /api/workflow[?activity=all]` | — | inquiries, opportunities, activity (latest 200, or all for export), notifications, `today`, `businessTimeZone` |
+| `GET /api/workflow` | — | Summary only (schema 3): counts, unread notifications, recent activity, follow-up totals, `today`, `businessTimeZone`. Records are paged through `GET /api/records/:type`; the complete set is `GET /api/export` ([API.md](API.md)) |
 | `PATCH /api/inquiries/:id` | `{ version, changes }` | `{ inquiry }`; 400 validation, 404, 409 stale |
 | `POST /api/inquiries/:id/convert` | `{ version, opportunity }` | 201 `{ inquiry, opportunity }`, 200 `alreadyConverted`, 409 |
 | `POST /api/opportunities` | `{ opportunity }` | 201 `{ opportunity }` |

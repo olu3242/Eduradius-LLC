@@ -5,10 +5,10 @@
 | | Local | Isolated staging | Production |
 | --- | --- | --- | --- |
 | Purpose | Development and automated checks | Release acceptance on hosted infrastructure | Live EduRadius site |
-| Database | `.wrangler/state` (Miniflare D1) | Its own D1 database, never shared | Production D1 |
+| Database | `.wrangler/state` (Miniflare D1) | Its own D1 database, never shared | Production D1 (Sites-managed) |
 | Auth | Dev server: loopback mock sign-in. `pnpm start`: configure `dist/server/.dev.vars` | Same mode as production | `sites` (Sites dispatch) or `token` (any other Worker host) |
 | Data | Clearly named test records only | Synthetic records only | Real records |
-| Status | Verified (see VERIFICATION.md) | **Not yet provisioned** | Existing Site; this release not deployed |
+| Status | Verified (see [VERIFICATION.md](VERIFICATION.md)) | **Not yet provisioned** | Existing Site (pre-workflow code); this release not deployed |
 
 The existing Site is **not** a staging target. Do not test this release against it.
 
@@ -22,7 +22,11 @@ The existing Site is **not** a staging target. Do not test this release against 
 | `WORKSPACE_ACCESS_TOKEN` | **Secret** (token) | `<output of: openssl rand -base64 32>` |
 | `DB` | D1 binding (`.openai/hosting.json`) | — |
 
-Never commit values. `.env*`, `.dev.vars*` and `*.pem` are git-ignored, and the preflight fails if any are tracked. Values never reach the browser bundle: they are read only in `lib/server/*`. Exports contain records but no configuration.
+Never commit values:
+
+- `.env*`, `.dev.vars*` and `*.pem` are git-ignored, and the preflight fails if any are tracked.
+- Values never reach the browser bundle; they are read only in `lib/server/*`.
+- Exports contain records but no configuration.
 
 ```sh
 pnpm preflight --target staging
@@ -30,99 +34,168 @@ pnpm preflight --target production
 pnpm preflight --target local --env-file dist/server/.dev.vars
 ```
 
-The preflight reports names and checks (presence, length, placeholder patterns, allowlist presence, migration order, tracked secret files). It never prints values.
+## Migrations
 
-## Local setup
+| # | File | Creates | Data change |
+| --- | --- | --- | --- |
+| 0000 | `0000_wonderful_exiles.sql` | `workspaces` | — |
+| 0001 | `0001_access_protection.sql` | `rate_limits` | — |
+| 0002 | `0002_connected_workflow.sql` | `inquiries`, `opportunities`, `activity_events`, `notifications`, `workspace_snapshots` + indexes | — |
+| 0003 | `0003_contracting_records.sql` | `organizations`, `contacts`, `requirements`, `evidence`, `evidence_links`; nullable `organization_id`/`contact_id` on `inquiries` and `opportunities` | — |
+| 0004 | `0004_proposals_and_teaming.sql` | `proposal_templates`, `proposals`, `proposal_versions`, `submissions`, `teaming_partners` | — |
+| 0005 | `0005_projects_and_delivery.sql` | `projects`, `project_baselines`, `milestones`, `deliverables`, `project_log` | — |
+| 0006 | `0006_delivery_closeout.sql` | `deliverable_versions`, `change_requests`, `project_closeouts`, `experience_records` | — |
+| 0007 | `0007_list_indexes.sql` | 18 indexes for paginated lists, parent filters and follow-ups | — |
+
+Every file only creates tables, indexes or nullable columns. Each statement creates exactly one object. No migration rewrites rows.
+
+**Additive schema is not the same as old code reading new data.** Here is what each code version can do with each schema and data state:
+
+| Code | Schema/data state | Works? | Evidence |
+| --- | --- | --- | --- |
+| This release (`af555c9`) | All of 0000–0007 | Yes | All suites |
+| This release | 0000–0006 (0007 not yet applied) | Yes, without the new indexes (slower lists) | `recovery.test` |
+| Previous candidate `e07844b` (Stage 3–4) | Data written by this release, 0007 applied | Yes: reads every record identically and its full contracting journey passes (27/27) | [VERIFICATION.md](VERIFICATION.md) |
+| Pre-workflow Site v5 | **Before** the first owner load of 0002+ code | Yes (nothing has moved yet) | — |
+| Pre-workflow Site v5 | **After** the legacy import | **No.** Requests, opportunities and activity are no longer in the document, and its save rejects the document (`400 Invalid workspace.`), because v5 requires an `opportunities` array | Verified locally with the original v5 handler; see Rollback |
+
+### Fresh install (empty database)
 
 ```sh
-corepack enable
-pnpm install --frozen-lockfile
-pnpm build
-for f in drizzle/0*.sql; do   # every migration, in numeric order
+corepack enable && pnpm install --frozen-lockfile && pnpm build
+for f in drizzle/0*.sql; do   # every migration, in numeric order (empty database only)
   node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local \
     --config dist/server/wrangler.json --persist-to .wrangler/state --file "$f"
 done
-pnpm dev
+pnpm dev     # 127.0.0.1; open /workspace and choose Sign in (loopback development identity)
 ```
 
-`pnpm dev` serves on `127.0.0.1`. Open `/workspace` and choose **Sign in** (loopback development identity).
+`scripts/perf/fresh-local-state.sh [--empty|--legacy]` does the same for local work and destroys only local state. It seeds a synthetic dataset by default, or a legacy-shaped document (`--legacy`) to exercise the import.
 
-## Migration order and compatibility
+### Existing database: inspect first, then apply only what is pending
 
-| # | File | Change | Compatible with previous code? |
-| --- | --- | --- | --- |
-| 0000 | `0000_wonderful_exiles.sql` | `workspaces` | — |
-| 0001 | `0001_access_protection.sql` | `rate_limits` | Yes (additive) |
-| 0002 | `0002_connected_workflow.sql` | `inquiries`, `opportunities`, `activity_events`, `notifications`, `workspace_snapshots` + indexes | Yes (additive; old code ignores the tables) |
-| 0003 | `0003_contracting_records.sql` | `organizations`, `contacts`, `requirements`, `evidence`, `evidence_links`; `organization_id`/`contact_id` columns on `inquiries` and `opportunities` | Yes (new tables; nullable `ADD COLUMN`; earlier code selects explicit columns) |
-| 0004 | `0004_proposals_and_teaming.sql` | `proposal_templates`, `proposals`, `proposal_versions`, `submissions`, `teaming_partners` | Yes (additive) |
-| 0005 | `0005_projects_and_delivery.sql` | `projects`, `project_baselines`, `milestones`, `deliverables`, `project_log` | Yes (additive) |
-| 0006 | `0006_delivery_closeout.sql` | `deliverable_versions`, `change_requests`, `project_closeouts`, `experience_records` | Yes (additive) |
+**Never replay migrations that are already applied.** The CREATE statements fail with "already exists". Determine the state first. The check is read-only and looks only at `sqlite_master`:
 
-Migrations 0003–0006 require **no data backfill**. Linking existing requests and opportunities to organizations is an explicit, rerunnable owner action (**Organizations → Link existing records**), not a migration. Because the workflow payload reads every table, apply **all** migrations before deploying code from this release.
+```sh
+# Local file
+node scripts/migration-status.mjs --sqlite .wrangler/state/v3/d1/miniflare-D1DatabaseObject/<hash>.sqlite
+# Hosted D1 (read-only query; Cloudflare-managed D1 that you operate)
+wrangler d1 execute <database> --remote --json --command "$(node scripts/migration-status.mjs --print-query)" > schema.json
+node scripts/migration-status.mjs --wrangler-json schema.json
+```
 
-- Never edit an applied migration; add a new numbered file (`pnpm db:generate`).
-- Apply migrations **before** deploying the code that needs them. 0002 is additive, so code from before this release keeps working after it is applied.
-- The legacy data move is **not** a SQL migration. It runs in the application on the first owner load, after both 0002 and the new code are in place (see WORKFLOW.md). It is transactional, idempotent and keeps a snapshot.
+The tool lists each file as `applied`, `pending` or `partial`. It prints the files to apply, in order, only when the applied files form a clean prefix. It exits with code 2 if any file is partial or out of order, and it refuses to prescribe anything from an empty or failed schema read.
+
+Then:
+
+1. Take a backup (below).
+2. Apply each pending file, in order, with `wrangler d1 execute <database> --remote --file drizzle/<file>`.
+3. Re-run the status check and confirm `Up to date`.
+
+On the Sites-managed production database, publishing applies migrations ([SITES_RUNTIME.md](SITES_RUNTIME.md)). Confirm with the platform how already-applied files are tracked before the first publish of this release (blocker K2).
+
+### Interrupted migration
+
+A partial file is reported with its missing objects. Each statement creates one object, so the safe completion is to apply only the missing statements:
+
+```sh
+node scripts/migration-status.mjs --wrangler-json schema.json --resume-sql 0007_list_indexes.sql > resume.sql   # review it
+wrangler d1 execute <database> --remote --file resume.sql
+```
+
+Re-run the status check afterwards. Rerunning the whole file instead fails at the first object that already exists. Tests cover a half-applied 0007 and a 0003 whose tables exist but whose columns are missing, with data preserved. If anything else looks wrong, restore the pre-migration backup.
+
+### Data moves that are not migrations
+
+- **The legacy JSON import** runs in the application on the first owner load after 0002 and the new code are in place ([WORKFLOW.md](WORKFLOW.md)).
+  - It is one D1 batch, so an interruption leaves no partial rows, snapshot or document change (tested).
+  - It is idempotent: existing ids and already-imported legacy activity are skipped.
+  - It keeps a snapshot `pre-workflow-r<revision>` of the original document for each run.
+- **Linking organizations** is an explicit, rerunnable owner action.
 - After deploying, ask owners to reload open workspace tabs. Stale tabs receive a 409 on save, by design.
 
 ## Backup and restore
 
-**Local** (verified in this iteration):
+| Method | Scope | Verified |
+| --- | --- | --- |
+| **Logical backup** (`wrangler d1 export`) | Schema and data as SQL | **Locally, with the real tool.** A database holding the complete synthetic journey and a rollback round trip was exported (95 rows, 167 statements) and restored into an empty state with `d1 execute --file`. The owner export before and after was **identical**: document, every record, ids, versions, links and manifest counts. |
+| File copy of `.wrangler/state` | Local only | Locally (used throughout testing) |
+| D1 time travel (`wrangler d1 time-travel info/restore`) | Point-in-time, Cloudflare D1 that you operate | Not verified (no hosted database) |
+| Sites-managed D1 | Platform procedure | **Not confirmed.** Blocker K2: confirm with the hosting provider before the first production migration; if no supported export exists, do not migrate production |
+| **Owner export** (`GET /api/export`, the workspace "Export" button) | Every record, in one consistent snapshot | Complete at 2,100+ opportunities; refuses rather than truncates. It is an audit and recovery aid, **not** a database restore. |
 
 ```sh
-# stop pnpm dev / pnpm start first so SQLite files are consistent
-cp -r .wrangler/state ".wrangler-backup-$(date +%Y%m%d%H%M)"
-# restore: stop servers, then replace the directory
-rm -rf .wrangler/state && cp -r .wrangler-backup-<stamp> .wrangler/state
+# Cloudflare D1 that you operate (before every migration)
+wrangler d1 export <database> --remote --output backup-<stamp>.sql
+wrangler d1 time-travel info <database>                                   # record the bookmark
+# Restore into a NEW, empty database (never over a live one), verify, then switch the binding:
+wrangler d1 execute <new-database> --remote --file backup-<stamp>.sql
+node scripts/migration-status.mjs --wrangler-json <schema of new-database>   # expect "Up to date"
 ```
 
-`wrangler d1 export --local` reads `dist/server/.wrangler/state`, not `.wrangler/state`, so use the file copy above for local data.
+Local: `wrangler d1 export --local` reads the state next to the config (`dist/server/.wrangler/state`). Copy `.wrangler/state` there first, or use a file copy, with dev servers stopped.
 
-**Cloudflare D1 (standalone Worker hosting)**, using commands available in the pinned Wrangler 4.92.0:
+## Rollback
 
-```sh
-wrangler d1 export <database-name> --remote --output backup-<stamp>.sql   # logical backup before every migration
-wrangler d1 time-travel info <database-name>                             # record the current bookmark
-wrangler d1 time-travel restore <database-name> --bookmark=<bookmark>    # point-in-time restore
-```
+Choose by what was deployed and what happened since. Schema migrations are additive and are **not reversed**.
 
-**Sites-managed D1:** the backup and restore procedure for the hosted Site's database is platform-managed and **has not been confirmed in this repository**. Confirm it with the hosting provider before the first production migration. If no supported export exists, do not migrate production.
+| Situation | Safe action | Not safe |
+| --- | --- | --- |
+| This release misbehaves; the previous release was `e07844b` or later | Redeploy the previous artifact and leave migrations applied. Verified: `e07844b` reads this release's data identically and passes its journey. | Dropping 0007 indexes (no need) |
+| A migration failed part-way | Inspect, then resume the missing statements, or restore the pre-migration backup | Re-running the whole file; dropping tables that hold data |
+| Must return to **pre-workflow Site v5 after the legacy import** | Rebuild the legacy document (below), then redeploy v5 | Redeploying v5 alone. It hides every request and opportunity, and its save fails with 400 (verified with the original v5 handler) |
+| Data damaged by the release | Restore the pre-release backup into a new database, then reconcile records created since from an owner export taken before the restore | Restoring over the live database without an export of newer records |
 
-Application-level backup: **Export workspace** downloads the document and every workflow record (`schemaVersion: 2`). It is useful for audits and manual recovery, but it is not a database restore.
+### Returning to Site v5 after the import (tested locally)
 
-## Recovery
+1. Take a database backup and an owner export: `GET /api/export` saved as `export.json`.
+2. Run:
+   ```sh
+   node scripts/recovery/legacy-document.mjs --from-export export.json --out rollback/
+   ```
+   This rebuilds the legacy document from the **current** tables:
+   - every request and opportunity keeps its id; requests created after the import are included;
+   - statuses are mapped back (an unchanged imported request regains its exact original status);
+   - assignee and next action are appended to the request notes;
+   - the original legacy activity entries are restored.
 
-**Migrations 0003–0006 fail part-way.** Each only creates tables and indexes, except that 0003 also adds two nullable columns to `inquiries` and `opportunities`. Inspect `sqlite_master` and `PRAGMA table_info(inquiries)`. Then either drop the objects the failed file created (D1 supports `ALTER TABLE … DROP COLUMN` for the 0003 columns) and rerun that file, or restore the pre-migration backup. No existing rows are modified.
+   It writes `legacy-workspace.json` and `apply-legacy-workspace.sql`, and applies nothing. It **refuses** (exit 2) if the document would exceed v5's 700,000-character save limit. The synthetic dataset of 1,200 requests produced 1.94 M characters and was refused. In that case do not roll back to v5: fix forward or restore a backup.
+3. Apply `apply-legacy-workspace.sql`. It updates only if the document is still at the exported revision. Then redeploy v5.
+4. **While v5 is live:**
+   - workflow activity, organizations, contacts, requirements, evidence, proposals, projects and experience records stay in their tables, untouched and not shown by v5;
+   - new public requests go into the document.
+5. **Going forward again**, the first owner load imports the document. Only records added under v5 are inserted:
+   - existing ids and legacy activity are skipped;
+   - edits made under v5 to records that already exist in tables are **not** applied; they remain in the new `pre-workflow-r<revision>` snapshot for manual reconciliation.
 
-**Migration 0002 fails part-way.** D1 runs a file's statements without an outer transaction. Inspect with `SELECT name FROM sqlite_master`. Because 0002 only creates objects, drop any objects it created (`DROP TABLE` / `DROP INDEX` for the five tables and their indexes) and rerun it, or restore the pre-migration backup. Existing data is untouched.
+Verified locally:
 
-**The new release misbehaves after deploy.** Redeploy the previous build. Migration 0002 can stay, since old code ignores the new tables. Note that after the legacy import:
+- unit test (`recovery.test`), covering requests converted after the import, a project, a requirement on a legacy opportunity and an organization link;
+- a manual run on the dev stack after both browser journeys: export → legacy document → SQL applied → the original v5 GET read 3 requests, 3 opportunities and 1 legacy activity entry, and its PUT (owner save) returned 200 → forward again.
 
-- the previous code no longer sees inquiries, opportunities or activity, because they now live in tables;
-- the previous code writes new public requests into the workspace JSON, and the next release imports them automatically.
+Results of the manual run, forward again:
 
-To fully return to the old model, restore the document from `workspace_snapshots` (`pre-workflow-r<revision>`) **and** account for any records created afterwards.
-
-**The import conflicts repeatedly.** It retries on every owner load and is idempotent. Check the logs for `workspace.error` / `workflow.error`.
-
-**Duplicate-conversion suspicion.** `SELECT source_inquiry_id, COUNT(*) FROM opportunities GROUP BY 1 HAVING COUNT(*) > 1` must return no rows; the unique index enforces this.
+- the one request added under v5 was imported;
+- nothing was duplicated;
+- every contracting and delivery record (ids, versions, links) was identical.
 
 ## Health, logging and alerts
 
 **Endpoints (public, no secrets):**
 
 - `GET /api/health` is liveness and returns `{ status: "ok", build }`.
-- `GET /api/health/ready` is readiness. It returns 200 only when the database is reachable, every table the code reads exists, and an access mode is configured. Each check reports only `ok`, `incomplete`, `unavailable` or `not_configured`, plus the build commit, with no table names, modes, values or counts. `build` comes from `BUILD_COMMIT` at build time, or the local git commit.
+- `GET /api/health/ready` returns 200 only when the database is reachable, every table the code reads exists, and an access mode is configured.
+  - Each check reports only `ok`, `incomplete`, `unavailable` or `not_configured`, plus the build commit.
+  - Readiness does not check indexes; use the migration status check.
 
 **Logs:**
 
-- Every response carries `x-request-id`. A well-formed incoming ID is kept; otherwise a UUID is generated.
-- Every log line is one JSON object with `event`, `at` and `requestId`.
-- Keys that look like personal data, credentials or document content (email, token, password, secret, authorization, cookie, phone, name, scope, notes, body, content, summary) are redacted, and long strings are truncated to 300 characters. Tests cover the redaction.
-- Unhandled exceptions return a generic 500 with the request ID and log `http.exception` (method, path, message). Responses with status 500 or above log `http.error`.
+- Every response carries `x-request-id`, and every log line is one JSON object with `event`, `at` and `requestId`.
+- Keys that look like personal data, credentials or document content are redacted, and long strings are truncated.
+- Unhandled exceptions return a generic 500 with the request ID (`http.exception`); responses with status 500 or above log `http.error`.
+- Exports log `workspace.export` with counts only.
 
-**Alert rules (prepared, not activated).** Thresholds are owner decisions; no targets are assumed.
+**Alert rules (prepared, not activated).** Thresholds are owner decisions.
 
 | Signal | Condition | Action |
 | --- | --- | --- |
@@ -131,44 +204,44 @@ To fully return to the old model, restore the document from `workspace_snapshots
 | `workspace.access.denied` with `reason` `not_owner` or `anonymous` | spike above `<baseline>` | Possible probing; review the access policy |
 | `ratelimit.error`, `workflow.error`, `workspace.error`, `inquiry.error` | any | Database or code fault; intake and sign-in fail closed |
 | `inquiry.capacity` | any | Intake reached its stored-request cap |
+| `workspace.export` with `ok: false` | any | The workspace exceeded the export limits; use a database backup |
 
-Deliver alerts through the hosting provider's log alerting (for example Workers Logs or Logpush to an alerting system), configured by the owner. No alerts or scheduled monitors are active.
+No alerts or scheduled monitors are active.
 
 ## Identity and accountability
 
-- **`token` mode:** one shared access key. Every action is attributed to `token:session` (browser) or `token:bearer` (API). This cannot identify an individual person, so do **not** treat activity history as individual staff attribution. Rotate the key when someone's access must end.
-- **`sites` mode:** the actor is `sites:<stable Sites user id>` for allowlisted owners, which attributes actions to a signed-in account.
+- **`token` mode:** one shared access key.
+  - Every action is attributed to `token:session` (browser) or `token:bearer` (API). This **cannot identify an individual person**; do not treat activity as individual staff attribution.
+  - Rotate the key when someone's access must end.
+- **`sites` mode:** the actor is `sites:<stable Sites user id>` for allowlisted owners.
 - **Owner review:** approvals are owner reviews in a single-owner workspace, not independent second reviews.
 
 ## Staging acceptance checklist
 
 - [ ] Isolated staging Worker and its own D1 database provisioned (never the existing Site)
 - [ ] `pnpm preflight --target staging` passes with the staging configuration
-- [ ] Migrations 0000→0002 applied in order; `sqlite_master` lists all tables
-- [ ] Seed a legacy-shaped document (see `tests/workflow.test.mjs`); first owner load imports it and creates a snapshot
-- [ ] Anonymous visitor: `/api/workspace` and `/api/workflow` return 401 (or 503 if unconfigured)
-- [ ] Authenticated **non-owner** returns 403 (sites mode)
-- [ ] Owner journey: submit → review → assign → schedule follow-up → qualify → convert → open opportunity → reload
-- [ ] Retrying the conversion returns `alreadyConverted`; only one opportunity exists
-- [ ] Follow-ups show “Due today” against America/Chicago dates
-- [ ] `/api/site` contains no request, opportunity or note content
-- [ ] Mobile (390 px) Client requests, Follow-ups and dialogs have no horizontal overflow
-- [ ] Export downloads `schemaVersion: 2` with all collections
+- [ ] `migration-status` on the empty staging database, then 0000–0007 applied in order; status reports `Up to date`
+- [ ] Rehearse an upgrade: a second staging database at 0006 with synthetic data; status prescribes only 0007; apply it; status reports `Up to date`
+- [ ] Seed a legacy-shaped document (`scripts/local/seed-legacy-document.mjs` shows the shape); the first owner load imports it and creates a snapshot
+- [ ] Anonymous visitor: `/api/workspace`, `/api/workflow`, `/api/records/*`, `/api/export` return 401 (or 503 if unconfigured); an authenticated **non-owner** gets 403 (sites mode)
+- [ ] `scripts/staging-certify.mjs` passes on the exact candidate (48 checks, including pagination, cursor validation, reports and export completeness)
+- [ ] Browser journeys: `journey.mjs`, `contracting-journey.mjs`, `pagination-ui.mjs` (sign in through the token dialog or Sign in with ChatGPT)
+- [ ] Follow-ups show "Due today" against America/Chicago dates
+- [ ] Mobile (390 px): lists, pickers and dialogs have no horizontal overflow
+- [ ] Export downloads `schemaVersion: 2` with `manifest.counts` matching every collection
 - [ ] Logs contain no contact details or secrets
-- [ ] Contracting journey: create opportunity → link organization/contact → requirements + evidence → proposal → request changes → revise → approve → record submission → confirm award → create project → milestones → deliverable revision → client acceptance with verified evidence → approved change (baseline 2, baseline 1 kept) → closeout → private experience record → reload (see `tests/browser/contracting-journey.mjs`)
-- [ ] Retrying project creation and conversion returns the existing records; decided changes and preserved versions are read-only
-- [ ] Reports show “No records yet”, zero and unavailable counts correctly for staging data
-- [ ] Backup taken and a restore rehearsed on staging
+- [ ] Backup taken with the platform's tool and a restore rehearsed into a new database; the owner export is identical before and after
+- [ ] Rollback rehearsal: redeploy the previous artifact against the new data and confirm it reads everything
 
 ## Production release checklist
 
-- [ ] Staging acceptance checklist passed on this exact commit
-- [ ] CI green on the release commit
+- [ ] Staging acceptance checklist passed on this exact commit; CI green on it
 - [ ] `pnpm preflight --target production` passes
-- [ ] Production backup taken and its restore procedure confirmed for the hosting platform
-- [ ] Apply migrations (0001 if not yet applied, then 0002); verify tables
-- [ ] Deploy the build; confirm `/api/workflow` returns 401 anonymously
-- [ ] Owner loads the workspace once (runs the import); verify counts against the snapshot
+- [ ] Production backup taken and its restore procedure confirmed for the hosting platform (K2)
+- [ ] `migration-status` on production; apply exactly the pending files it lists; status reports `Up to date`
+- [ ] Deploy the build; `/api/health` reports the release commit; `/api/health/ready` is 200; `/api/workflow` returns 401 anonymously
+- [ ] Owner exports the workspace **before** the first load of the new release, if the document is still in legacy format
+- [ ] Owner loads the workspace once (runs the import); counts match the snapshot
 - [ ] Spot-check one migrated request, opportunity and the Follow-ups view
 - [ ] Owners reload any open workspace tabs
-- [ ] Rollback plan from this document reviewed
+- [ ] Rollback table above reviewed; the legacy-document tool tried on the pre-release export (and its size checked against 700,000)
