@@ -19,8 +19,27 @@ export default function Home(){
  const [w,setW]=useState<Workspace>(initialWorkspace),[page,setPage]=useState('Overview'),[loaded,setLoaded]=useState(false),[dirty,setDirty]=useState(false),[saving,setSaving]=useState(false),[revision,setRevision]=useState(0),[message,setMessage]=useState(''),[error,setError]=useState(''),[codeTab,setCodeTab]=useState('NAICS'),[query,setQuery]=useState(''),[filter,setFilter]=useState('All statuses'),[modal,setModal]=useState<Modal|null>(null),[mobile,setMobile]=useState(false),[print,setPrint]=useState(false),[readinessFilter,setReadinessFilter]=useState('All open items'),[modalError,setModalError]=useState(''),[auth,setAuth]=useState<Auth|null>(null),[accessKey,setAccessKey]=useState(''),[unlocking,setUnlocking]=useState(false);
  function load(){setError('');fetch('/api/workspace').then(async r=>{const body=await r.json().catch(()=>({})) as {data?:Workspace|null;revision?:number;auth?:Auth;error?:string};if(body.auth&&[401,403,503].includes(r.status)){setAuth({...body.auth,required:true,message:r.status===401?'':body.error});return}if(!r.ok)throw Error('Could not load your saved workspace. Reload to retry.');if(body.data)setW({...initialWorkspace(),...body.data,siteContent:{...initialWorkspace().siteContent,...body.data.siteContent}});setRevision(body.revision||0);setLoaded(true)}).catch(e=>setError(e.message))}
  useEffect(()=>{fetch('/api/auth/session').then(r=>r.json() as Promise<{auth:Auth}>).then(s=>setAuth(a=>a??{...s.auth,required:false})).catch(()=>{});load()},[]);
- const modalOpen=Boolean(modal);
- useEffect(()=>{if(!modalOpen&&!print)return;setModalError('');const previous=document.activeElement as HTMLElement;const dialog=document.querySelector('[role=dialog]') as HTMLElement;const focusable=()=>Array.from(dialog?.querySelectorAll<HTMLElement>('button, input, select, textarea, a[href]')||[]).filter(el=>!el.hasAttribute('disabled'));focusable()[0]?.focus();function key(e:KeyboardEvent){if(e.key==='Escape'){setModal(null);setPrint(false)}if(e.key==='Tab'){const nodes=focusable(),first=nodes[0],last=nodes[nodes.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus()}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus()}}}document.addEventListener('keydown',key);return()=>{document.removeEventListener('keydown',key);previous?.focus()}},[modalOpen,print]);
+ const modalOpen=Boolean(modal), authRequired=Boolean(auth?.required);
+ useEffect(()=>{
+  if(!modalOpen&&!print&&!authRequired)return;
+  const previous=document.activeElement instanceof HTMLElement?document.activeElement:null;
+  const dialog=document.querySelector<HTMLElement>(authRequired?'.auth-modal[role=dialog]':'[role=dialog]');
+  if(!dialog)return;
+  const focusable=()=>Array.from(dialog.querySelectorAll<HTMLElement>('button, input, select, textarea, a[href]')).filter(el=>!el.hasAttribute('disabled'));
+  focusable()[0]?.focus();
+  function key(e:KeyboardEvent){
+   if(e.key==='Escape'&&!authRequired){setModal(null);setPrint(false)}
+   if(e.key==='Tab'){
+    const nodes=focusable(),first=nodes[0],last=nodes[nodes.length-1];
+    if(!dialog?.contains(document.activeElement)){e.preventDefault();(e.shiftKey?last:first)?.focus()}
+    else if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus()}
+    else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus()}
+   }
+  }
+  document.addEventListener('keydown',key);
+  return()=>{document.removeEventListener('keydown',key);if(previous?.isConnected)previous.focus()};
+ },[modalOpen,print,authRequired]);
+ useEffect(()=>{if(modalOpen)setModalError('')},[modalOpen]);
  useEffect(()=>{function prevent(e:BeforeUnloadEvent){if(dirty){e.preventDefault();e.returnValue=''}} window.addEventListener('beforeunload',prevent);return()=>window.removeEventListener('beforeunload',prevent)},[dirty]);
  function edit(fn:(d:Workspace)=>void){setW(prev=>{const d=structuredClone(prev);fn(d);return d});setDirty(true);setMessage('')}
  function go(name:string){setPage(name);setQuery('');setFilter('All statuses');setMobile(false)}

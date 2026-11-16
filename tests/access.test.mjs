@@ -11,6 +11,7 @@ import { readJson } from '../lib/server/http.ts';
 import { readWorkspace, writeWorkspace } from '../lib/server/workspace-store.ts';
 import { consume, LIMITS } from '../lib/server/rate-limit.ts';
 import { toPublicSite } from '../lib/public-site.ts';
+import { INQUIRY_KINDS } from '../lib/inquiry.ts';
 import { initialWorkspace } from '../lib/workspace.ts';
 
 const token = 'test-only-access-key-with-at-least-32-characters';
@@ -190,3 +191,13 @@ test('workspace write rejects malformed JSON and oversize payloads', async () =>
 test('public intake returns 413 for oversize bodies', async () => {
   assert.equal((await inquiries.POST(request('/api/inquiries', 'POST', { ...inquiry, scope: 'é'.repeat(9000) }))).status, 413);
 });
+
+for (const kind of INQUIRY_KINDS) {
+  test(`public form request type persists: ${kind}`, async () => {
+    const response = await inquiries.POST(request('/api/inquiries', 'POST', { ...inquiry, kind, sector: 'Education & learning' }));
+    assert.equal(response.status, 201);
+    const stored = await readWorkspace();
+    assert.equal(stored.data.inquiries[0].kind, kind);
+    assert.equal(stored.data.inquiries[0].sector, 'Education & learning');
+  });
+}

@@ -2,11 +2,11 @@ import { clientAddress, crossSiteRejection, json, logEvent, readJson } from '../
 import { consume, LIMITS } from '../../../lib/server/rate-limit';
 import { MAX_WORKSPACE_BYTES, readWorkspace, writeWorkspace } from '../../../lib/server/workspace-store';
 import { initialWorkspace } from '../../../lib/workspace';
+import { isInquiryKind } from '../../../lib/inquiry';
 export const dynamic = 'force-dynamic';
 
 // Public, append-only intake. Visitors can add one inquiry; they can never read or
 // replace the workspace.
-const INQUIRY_KINDS = ['Project briefing', 'Teaming inquiry', 'AI consulting briefing', 'AI governance briefing', 'AI adoption briefing', 'Training and education briefing'];
 const MAX_INQUIRIES = 500;
 const LIMITS_BY_FIELD = { name: 120, organization: 160, email: 254, sector: 80, scope: 4000 } as const;
 type Body = Partial<Record<keyof typeof LIMITS_BY_FIELD | 'kind' | 'website', unknown>>;
@@ -19,7 +19,7 @@ function validate(body: Body) {
     out[field] = value;
   }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(out.email)) return null;
-  const kind = typeof body.kind === 'string' && INQUIRY_KINDS.includes(body.kind) ? body.kind : null;
+  const kind = isInquiryKind(body.kind) ? body.kind : null;
   return kind ? { ...out, kind } : null;
 }
 
