@@ -97,6 +97,25 @@ export const workspaceSnapshots = sqliteTable('workspace_snapshots', {
   createdAt: text('created_at').notNull(),
 });
 
+// Legacy re-import conflicts (migration 0008): an existing request or opportunity whose legacy
+// copy changed after it was handed to the pre-workflow app (rollback window). Never applied
+// automatically; the owner decides each one.
+export const importConflicts = sqliteTable('import_conflicts', {
+  id: text('id').primaryKey(),
+  sourceSnapshotId: text('source_snapshot_id').notNull(),
+  subjectType: text('subject_type').notNull(),
+  subjectId: text('subject_id').notNull(),
+  legacyItem: text('legacy_item').notNull(),
+  baseline: text('baseline').notNull(),
+  fields: text('fields').notNull(),
+  status: text('status').notNull().default('Open'),
+  decisionReason: text('decision_reason').notNull().default(''),
+  decidedBy: text('decided_by'),
+  decidedAt: text('decided_at'),
+  version: integer('version').notNull().default(1),
+  createdAt: text('created_at').notNull(),
+}, t => [uniqueIndex('import_conflicts_uq').on(t.sourceSnapshotId, t.subjectType, t.subjectId), index('import_conflicts_status_idx').on(t.status)]);
+
 // ── Contracting execution (migration 0003). Columns mirror lib/records.ts SPECS. ──
 const recordColumns = () => ({
   version: integer('version').notNull().default(1),

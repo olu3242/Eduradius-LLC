@@ -13,7 +13,7 @@ export type AuthInfo = { mode: string; signInUrl?: string; signOutUrl?: string }
 export type CallResult<T> = { ok: true; status: number; data: T } | { ok: false; status: number; error: string; body: Values };
 export type Summary = {
   schema: 3; businessTimeZone: string; today: string; notifications: NotificationRecord[]; unreadNotifications: number; activity: ActivityRecord[];
-  owners: string[]; opportunityStatusCounts: Record<string, number>; recentOpportunities: Pick<OpportunityRecord, 'id' | 'title' | 'agency' | 'stage' | 'status' | 'decision' | 'updatedAt'>[]; counts: Record<string, number>; followUpsDue: number;
+  owners: string[]; opportunityStatusCounts: Record<string, number>; recentOpportunities: Pick<OpportunityRecord, 'id' | 'title' | 'agency' | 'stage' | 'status' | 'decision' | 'updatedAt'>[]; counts: Record<string, number>; followUpsDue: number; openImportConflicts: number;
 };
 type Store = { records: Record<string, Values[]>; inquiries: InquiryRecord[]; opportunities: OpportunityRecord[]; evidenceLinks: EvidenceLink[] };
 export type WorkspaceData = Summary & Store;

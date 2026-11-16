@@ -8,7 +8,7 @@ declare const __EDURADIUS_BUILD__: string | undefined;
 export const buildCommit = () => (typeof __EDURADIUS_BUILD__ === 'string' && __EDURADIUS_BUILD__) || 'unknown';
 
 /** Every table the current code reads (migrations 0000–0006). */
-export const REQUIRED_TABLES = [...new Set(['workspaces', 'rate_limits', 'inquiries', 'opportunities', 'activity_events', 'notifications', 'workspace_snapshots', 'evidence_links', ...Object.values(SPECS).map(s => s.table)])];
+export const REQUIRED_TABLES = [...new Set(['workspaces', 'rate_limits', 'inquiries', 'opportunities', 'activity_events', 'notifications', 'workspace_snapshots', 'evidence_links', 'import_conflicts', ...Object.values(SPECS).map(s => s.table)])];
 
 export async function readiness() {
   const checks = { database: 'unavailable', schema: 'unknown', access: authMode() === 'unconfigured' ? 'not_configured' : 'configured' } as Record<string, string>;

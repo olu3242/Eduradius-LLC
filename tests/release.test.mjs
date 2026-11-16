@@ -53,7 +53,7 @@ test('an empty database migrates through every file to the full schema', async (
   const fresh = database();
   const tables = (await fresh.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()).results.map(r => r.name);
   fresh.close();
-  assert.equal(migrationFiles().length, 8);
+  assert.equal(migrationFiles().length, 9);
   for (const t of ['workspaces', 'rate_limits', 'inquiries', 'organizations', 'proposal_versions', 'projects', 'experience_records']) assert.ok(tables.includes(t), t);
 });
 

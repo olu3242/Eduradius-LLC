@@ -4,6 +4,7 @@ import { SPECS, EVIDENCE_SUBJECTS, PROJECT_TRANSITIONS, ACCEPTANCE_KINDS, closeo
 import { businessDate, isIsoDate } from '../workflow';
 import { activityStatement, type StoreResult } from './workflow-store';
 import { db, nowIso, getRecord, getRecords, listByField, recordExists, tableFor, activity, conflict, insertStatement } from './records-store';
+import { resolveImportConflict } from './import-conflicts';
 
 type Body = Record<string, unknown>;
 export type Action = (body: Body, actor: string) => Promise<StoreResult<unknown>>;
@@ -555,5 +556,6 @@ export const ACTIONS: Record<string, Action> = {
   'organization.linkExisting': linkExisting,
   'inquiry.link': (b, a) => linkParty('inquiries', 'inquiry', b, a),
   'opportunity.link': (b, a) => linkParty('opportunities', 'opportunity', b, a),
+  'importConflict.resolve': resolveImportConflict,
 };
 export type { Values };

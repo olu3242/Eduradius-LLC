@@ -70,8 +70,9 @@ export async function workspaceSummary() {
     db().prepare('SELECT status, COUNT(*) AS n FROM opportunities GROUP BY status'),
     db().prepare('SELECT id, title, agency, stage, status, decision, updated_at FROM opportunities ORDER BY updated_at DESC, id DESC LIMIT 5'),
     db().prepare(`SELECT ${tables.map(([type, table]) => `(SELECT COUNT(*) FROM ${table}) AS "${type}"`).join(', ')}`),
+    db().prepare("SELECT COUNT(*) AS n FROM import_conflicts WHERE status = 'Open'"),
   ];
-  const [notifications, unread, activity, owners, oppStatus, recent, counts] = await db().batch(statements);
+  const [notifications, unread, activity, owners, oppStatus, recent, counts, conflicts] = await db().batch(statements);
   const queue = await followUps({ kind: 'all', owner: null }, today, 1);
   return {
     schema: 3 as const,
@@ -86,6 +87,7 @@ export async function workspaceSummary() {
     recentOpportunities: (recent.results as Row[]).map(r => ({ id: s(r.id), title: s(r.title), agency: s(r.agency), stage: s(r.stage), status: s(r.status), decision: s(r.decision), updatedAt: s(r.updated_at) })),
     counts: Object.fromEntries(Object.entries((counts.results as Row[])[0]).map(([k, v]) => [k, Number(v)])) as Record<string, number>,
     followUpsDue: queue.overdue.total + queue.dueToday.total,
+    openImportConflicts: Number((conflicts.results as Row[])[0].n),
   };
 }
 export type WorkspaceSummary = Awaited<ReturnType<typeof workspaceSummary>>;

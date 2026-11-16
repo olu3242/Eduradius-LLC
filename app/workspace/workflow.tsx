@@ -270,6 +270,7 @@ export function FollowUpsView({ wf, onOpenInquiry, onOpenOpportunity, onConvert 
     <div aria-live="polite">{notice && <p className="success-line"><Check size={13} />{notice}</p>}</div>
     <Alert message={error || loadError} />
     </div>
+    {data.openImportConflicts > 0 && <ImportConflictsPanel wf={wf} />}
     {unread.length > 0 && <section className="panel followup-section" aria-labelledby="fu-new">
       <div className="panel-heading"><h2 id="fu-new"><BellRing size={16} aria-hidden="true" /> New requests <span className="nav-count">{data.unreadNotifications}</span></h2><button className="text-button" onClick={() => void wf.markRead({ all: true })}>Mark all as read</button></div>
       <ul className="followup-list">{unread.map(n => <li key={n.id}><div><strong>{n.title}</strong><small>{new Date(n.createdAt).toLocaleString()} · in-app only (email {n.emailStatus})</small></div>
@@ -291,9 +292,39 @@ export function FollowUpsView({ wf, onOpenInquiry, onOpenOpportunity, onConvert 
   </div>;
 }
 
-/** Count shown in navigation: overdue plus due-today follow-ups (computed on the server). */
+/** Count shown in navigation: overdue plus due-today follow-ups and rollback conflicts (server-computed). */
 export function followUpCount(data: Summary | null) {
-  return data?.followUpsDue ?? 0;
+  return (data?.followUpsDue ?? 0) + (data?.openImportConflicts ?? 0);
+}
+
+type ImportConflict = { id: string; subjectType: string; subjectId: string; fields: string[]; legacyItem: Record<string, unknown>; current: Record<string, unknown>; version: number; createdAt: string };
+const show = (v: unknown) => (v === null || v === undefined || v === '' ? '—' : typeof v === 'string' ? v : JSON.stringify(v));
+/** Records edited in the legacy document during a rollback window. Nothing is applied without a decision. */
+function ImportConflictsPanel({ wf }: { wf: Workflow }) {
+  const [items, setItems] = useState<ImportConflict[]>([]), [total, setTotal] = useState(0), [reasons, setReasons] = useState<Record<string, string>>({}), [error, setError] = useState(''), [notice, setNotice] = useState('');
+  const { call, revision } = wf;
+  useEffect(() => { void call<{ items: ImportConflict[]; total: number }>('/api/import-conflicts').then(r => { if (r.ok) { setItems(r.data.items); setTotal(r.data.total); } else setError(r.error); }); }, [call, revision]);
+  async function decide(c: ImportConflict, decision: 'keep-current' | 'apply-legacy') {
+    setError(''); setNotice('');
+    const r = await wf.action('importConflict.resolve', { id: c.id, version: c.version, decision, reason: reasons[c.id] ?? '' });
+    if (r.ok) setNotice(decision === 'apply-legacy' ? 'Legacy edit applied and recorded.' : 'Current record kept; the decision is recorded.'); else setError(r.error);
+  }
+  return <section className="panel followup-section" aria-labelledby="fu-conflicts">
+    <div className="panel-heading"><h2 id="fu-conflicts">Rollback conflicts — decision required <span className="nav-count">{total}</span></h2></div>
+    <p className="muted">These records were changed in the legacy workspace after they had moved to workflow records. The current values are kept until you decide. Each decision needs a reason and is recorded in activity.</p>
+    <div aria-live="polite">{notice && <p className="success-line"><Check size={13} />{notice}</p>}</div>
+    <Alert message={error} />
+    <ul className="followup-list">{items.map(c => <li key={c.id}><div>
+      <strong>{c.subjectType === 'inquiry' ? 'Request' : 'Opportunity'}: {show(c.current.organization ?? c.current.title ?? c.subjectId)}</strong>
+      <table className="conflict-table"><thead><tr><th scope="col">Field</th><th scope="col">Current (kept)</th><th scope="col">Legacy edit</th></tr></thead>
+        <tbody>{c.fields.map(f => <tr key={f}><th scope="row">{f}</th><td>{show(c.current[f])}</td><td>{show(c.legacyItem[f])}</td></tr>)}</tbody></table>
+      <label className="field wide"><span>Reason for your decision *</span><textarea rows={2} maxLength={1000} value={reasons[c.id] ?? ''} onChange={e => setReasons(r => ({ ...r, [c.id]: e.target.value }))} /></label>
+    </div><div className="row-actions">
+      <button className="button secondary" disabled={!(reasons[c.id] ?? '').trim()} onClick={() => void decide(c, 'keep-current')}>Keep current</button>
+      <button className="button primary" disabled={!(reasons[c.id] ?? '').trim()} onClick={() => void decide(c, 'apply-legacy')}>Apply legacy edit</button>
+    </div></li>)}</ul>
+    {total > items.length && <p className="muted empty-row">Showing {items.length} of {total}; decide these to see the rest.</p>}
+  </section>;
 }
 
 /** Renders children once the inquiry is in the cache (fetching it by id when needed). */

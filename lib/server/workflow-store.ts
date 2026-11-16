@@ -8,6 +8,7 @@ import {
   type ActivityDraft, type ActivityRecord, type InquiryRecord, type NotificationRecord, type OpportunityInput, type OpportunityRecord, type InquiryStatus,
 } from '../workflow';
 import { readWorkspace, WORKSPACE_ID } from './workspace-store';
+import { differingFields, fingerprint, legacyInquiry, legacyOpportunity, ROLLBACK_MARKER } from '../legacy-rollback';
 
 export const MAX_STORED_INQUIRIES = 5000;
 /** Email delivery is not configured: every notification records that no email was sent. */
@@ -244,7 +245,46 @@ const oneOf = <T extends readonly string[]>(v: unknown, allowed: T, fallback: T[
  * One transaction: snapshot the original document, INSERT OR IGNORE every record by id,
  * then strip the arrays only if the document revision is unchanged. Safe to rerun.
  */
-export async function importLegacyWorkflow(): Promise<{ imported: boolean; inquiries?: number; opportunities?: number; activity?: number }> {
+export type DetectedConflict = { id: string; subjectType: 'inquiry' | 'opportunity'; subjectId: string; legacyItem: string; baseline: string; fields: string };
+/**
+ * Legacy items whose id already exists in the tables are never imported over the table record.
+ * If such an item CHANGED since it was handed to the legacy app — compared with the rollback
+ * marker's fingerprint, or else with the same item in the previous import snapshot — the change
+ * is recorded as an open conflict for an explicit owner decision instead of being dropped.
+ */
+export async function detectImportConflicts(data: Row): Promise<DetectedConflict[]> {
+  const marker = (data[ROLLBACK_MARKER] as { fingerprints?: Record<string, string> } | undefined)?.fingerprints ?? null;
+  const previousRow = await db().prepare('SELECT data FROM workspace_snapshots WHERE workspace_id = ? ORDER BY created_at DESC, id DESC LIMIT 1').bind(WORKSPACE_ID).first<Row>();
+  let previous: Row = {};
+  try { previous = previousRow ? JSON.parse(s(previousRow.data)) : {}; } catch { /* unreadable snapshot: compare with the tables */ }
+  const out: DetectedConflict[] = [];
+  for (const kind of ['inquiry', 'opportunity'] as const) {
+    const key = kind === 'inquiry' ? 'inquiries' : 'opportunities';
+    const items = objects(data[key]).filter(i => s(i.id));
+    if (!items.length) continue;
+    const existing = new Map<string, Row>();
+    const ids = items.map(i => s(i.id));
+    for (let i = 0; i < ids.length; i += 90) {
+      const chunk = ids.slice(i, i + 90);
+      const rows = (await db().prepare(`SELECT ${kind === 'inquiry' ? INQUIRY_SELECT : OPPORTUNITY_SELECT} FROM ${key} WHERE id IN (${chunk.map(() => '?').join(', ')})`).bind(...chunk).all<Row>()).results;
+      for (const r of rows) existing.set(s(r.id), r);
+    }
+    const previousItems = new Map(objects(previous[key]).map(i => [s(i.id), i]));
+    for (const item of items) {
+      const id = s(item.id), row = existing.get(id);
+      if (!row) continue; // not in the tables yet: imported as a new record
+      const current = (kind === 'inquiry' ? legacyInquiry(toInquiry(row)) : legacyOpportunity(toOpportunity(row))) as unknown as Row;
+      const handed = marker?.[`${kind}:${id}`] ?? (previousItems.has(id) ? await fingerprint(kind, previousItems.get(id)!) : await fingerprint(kind, current));
+      if ((await fingerprint(kind, item)) === handed) continue; // unchanged since it was handed over
+      const fields = differingFields(kind, item, current);
+      if (!fields.length) continue; // changed back to what the tables already hold
+      out.push({ id: crypto.randomUUID(), subjectType: kind, subjectId: id, legacyItem: JSON.stringify(item), baseline: JSON.stringify(current), fields: JSON.stringify(fields) });
+    }
+  }
+  return out;
+}
+
+export async function importLegacyWorkflow(): Promise<{ imported: boolean; inquiries?: number; opportunities?: number; activity?: number; conflicts?: number }> {
   const stored = await readWorkspace();
   if (!stored.data || !LEGACY_KEYS.some(k => k in stored.data!)) return { imported: false };
   const data = stored.data, at = nowIso();
@@ -270,14 +310,17 @@ export async function importLegacyWorkflow(): Promise<{ imported: boolean; inqui
   const activity = objects(data.activity).map(item => ({
     id: stableId('legacy-activity', s(item.text) + '|' + s(item.date)), occurred_at: isoOr(item.date, at), summary: s(item.text).slice(0, 300) || 'Legacy activity entry',
   }));
+  const conflicts = await detectImportConflicts(data);
+  const snapshotId = `pre-workflow-r${stored.revision}`;
   const stripped = { ...data };
   for (const k of LEGACY_KEYS) delete stripped[k];
+  delete stripped[ROLLBACK_MARKER];
   const counts = { inquiries: inquiries.length, opportunities: opportunities.length, activity: activity.length };
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
   const j = (path: string) => `json_extract(value, '$.${path}')`;
   const results = await db().batch([
     db().prepare('INSERT OR IGNORE INTO workspace_snapshots (id, workspace_id, revision, data, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .bind(`pre-workflow-r${stored.revision}`, WORKSPACE_ID, stored.revision, JSON.stringify(data), 'Before moving inquiries, opportunities and activity into workflow tables', at),
+      .bind(snapshotId, WORKSPACE_ID, stored.revision, JSON.stringify(data), 'Before moving inquiries, opportunities and activity into workflow tables', at),
     db().prepare(`INSERT OR IGNORE INTO inquiries (id, kind, name, organization, email, sector, scope, status, legacy_status, notes, reason, source, version, created_at, updated_at)
       SELECT ${['id', 'kind', 'name', 'organization', 'email', 'sector', 'scope', 'status', 'legacy_status', 'notes', 'reason'].map(j).join(', ')}, 'legacy-import', 1, ${j('created_at')}, ${j('updated_at')} FROM json_each(?)`)
       .bind(JSON.stringify(inquiries)),
@@ -295,6 +338,11 @@ export async function importLegacyWorkflow(): Promise<{ imported: boolean; inqui
     db().prepare(`INSERT OR IGNORE INTO activity_events (id, occurred_at, actor, type, subject_type, subject_id, summary, details)
       SELECT ?, ?, 'system:legacy-import', 'workflow.imported', 'workspace', NULL, ?, ? WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ? AND revision = ? AND updated_at = ?)`)
       .bind(`workflow-import-r${stored.revision}`, at, `Moved ${plural(counts.inquiries, 'inquiry', 'inquiries')}, ${plural(counts.opportunities, 'opportunity', 'opportunities')} and ${plural(counts.activity, 'activity entry', 'activity entries')} into workflow records`, JSON.stringify(counts), WORKSPACE_ID, stored.revision + 1, at),
+    // Rollback-window conflicts: recorded once per snapshot, never applied automatically.
+    ...conflicts.map(c => db().prepare(`INSERT OR IGNORE INTO import_conflicts (id, source_snapshot_id, subject_type, subject_id, legacy_item, baseline, fields, status, version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'Open', 1, ?)`)
+      .bind(c.id, snapshotId, c.subjectType, c.subjectId, c.legacyItem, c.baseline, c.fields, at)),
+    ...(conflicts.length ? [db().prepare(`INSERT OR IGNORE INTO activity_events (id, occurred_at, actor, type, subject_type, subject_id, summary, details) VALUES (?, ?, 'system:legacy-import', 'import.conflicts_detected', 'workspace', NULL, ?, ?)`)
+      .bind(`import-conflicts-r${stored.revision}`, at, `${conflicts.length} records changed in the legacy document after they were moved to workflow tables; owner decision required`, JSON.stringify({ count: conflicts.length, snapshot: snapshotId }))] : []),
   ]);
-  return { imported: Boolean(results[4].meta.changes), ...counts };
+  return { imported: Boolean(results[4].meta.changes), ...counts, conflicts: conflicts.length };
 }
