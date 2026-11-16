@@ -33,17 +33,20 @@ export const defaultChecks = (): Record<(typeof CHECK_KEYS)[number], string> => 
 export type InquiryRecord = {
   id: string; kind: string; name: string; organization: string; email: string; sector: string; scope: string;
   status: InquiryStatus; legacyStatus: string | null; assignee: string; nextAction: string; nextActionDue: string | null;
-  notes: string; reason: string; opportunityId: string | null; source: string; version: number; createdAt: string; updatedAt: string;
+  notes: string; reason: string; opportunityId: string | null; source: string; organizationId?: string | null; contactId?: string | null; version: number; createdAt: string; updatedAt: string;
 };
 export type OpportunityRecord = {
   id: string; sourceInquiryId: string | null; title: string; agency: string; url: string; deadline: string; value: string;
   naics: string; psc: string; stage: string; decision: string; owner: string; notes: string; checks: Record<string, string>;
   status: string; contactName: string; contactEmail: string; sector: string; service: string; nextAction: string;
-  nextActionDue: string | null; version: number; createdAt: string; updatedAt: string;
+  nextActionDue: string | null; organizationId?: string | null; contactId?: string | null; version: number; createdAt: string; updatedAt: string;
 };
 export type ActivityRecord = { id: string; occurredAt: string; actor: string; type: string; subjectType: string; subjectId: string | null; summary: string; details: Record<string, unknown> };
 export type NotificationRecord = { id: string; kind: string; subjectType: string; subjectId: string | null; title: string; createdAt: string; readAt: string | null; emailStatus: string };
-export type WorkflowSnapshot = { inquiries: InquiryRecord[]; opportunities: OpportunityRecord[]; activity: ActivityRecord[]; notifications: NotificationRecord[]; businessTimeZone: string; today: string };
+export type RecordValues = Record<string, unknown>;
+export type WorkflowSnapshot = { inquiries: InquiryRecord[]; opportunities: OpportunityRecord[]; activity: ActivityRecord[]; notifications: NotificationRecord[]; businessTimeZone: string; today: string;
+  /** Spec-defined records by type (lib/records.ts) and evidence links. */
+  records?: Record<string, RecordValues[]>; evidenceLinks?: { id: string; evidenceId: string; subjectType: string; subjectId: string; createdAt: string }[] };
 export type ActivityDraft = { type: string; summary: string; details?: Record<string, unknown> };
 
 // ── Field validation ────────────────────────────────────────────────────────
@@ -137,7 +140,7 @@ export function mapLegacyInquiryStatus(value: unknown): { status: InquiryStatus;
 
 // ── Opportunities ───────────────────────────────────────────────────────────
 
-export type OpportunityInput = Omit<OpportunityRecord, 'id' | 'sourceInquiryId' | 'version' | 'createdAt' | 'updatedAt'>;
+export type OpportunityInput = Omit<OpportunityRecord, 'id' | 'sourceInquiryId' | 'version' | 'createdAt' | 'updatedAt' | 'organizationId' | 'contactId'>;
 const OPPORTUNITY_KEYS = new Set<string>([...Object.keys(OPPORTUNITY_LIMITS), 'deadline', 'stage', 'decision', 'status', 'checks', 'nextActionDue']);
 export const emptyOpportunity = (): OpportunityInput => ({ title: '', agency: '', url: '', deadline: '', value: '', naics: '', psc: '', stage: 'Discover', decision: 'Undecided', owner: '', notes: '', checks: defaultChecks(), status: 'Tentative', contactName: '', contactEmail: '', sector: '', service: '', nextAction: '', nextActionDue: null });
 
@@ -243,11 +246,11 @@ export function actorLabel(actor: string) {
 }
 
 /** Owner backup: the planning document plus every workflow record (schema version 2). */
-export function exportBundle(document: unknown, workflow: Pick<WorkflowSnapshot, 'inquiries' | 'opportunities' | 'activity' | 'businessTimeZone'>, now: Date = new Date()) {
+export function exportBundle(document: unknown, workflow: Pick<WorkflowSnapshot, 'inquiries' | 'opportunities' | 'activity' | 'businessTimeZone' | 'records' | 'evidenceLinks'>, now: Date = new Date()) {
   return {
     schemaVersion: 2 as const,
     exportedAt: now.toISOString(),
     workspace: document,
-    workflow: { businessTimeZone: workflow.businessTimeZone, inquiries: workflow.inquiries, opportunities: workflow.opportunities, activity: workflow.activity },
+    workflow: { businessTimeZone: workflow.businessTimeZone, inquiries: workflow.inquiries, opportunities: workflow.opportunities, activity: workflow.activity, records: workflow.records ?? {}, evidenceLinks: workflow.evidenceLinks ?? [] },
   };
 }

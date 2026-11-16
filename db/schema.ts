@@ -23,6 +23,8 @@ export const inquiries = sqliteTable('inquiries', {
   reason: text('reason').notNull().default(''),
   opportunityId: text('opportunity_id'),
   source: text('source').notNull().default('public'),
+  organizationId: text('organization_id'),
+  contactId: text('contact_id'),
   version: integer('version').notNull().default(1),
   lastRequestId: text('last_request_id'),
   createdAt: text('created_at').notNull(),
@@ -51,6 +53,8 @@ export const opportunities = sqliteTable('opportunities', {
   service: text('service').notNull().default(''),
   nextAction: text('next_action').notNull().default(''),
   nextActionDue: text('next_action_due'),
+  organizationId: text('organization_id'),
+  contactId: text('contact_id'),
   version: integer('version').notNull().default(1),
   lastRequestId: text('last_request_id'),
   createdAt: text('created_at').notNull(),
@@ -91,3 +95,78 @@ export const workspaceSnapshots = sqliteTable('workspace_snapshots', {
   reason: text('reason').notNull(),
   createdAt: text('created_at').notNull(),
 });
+
+// ── Contracting execution (migration 0003). Columns mirror lib/records.ts SPECS. ──
+const recordColumns = () => ({
+  version: integer('version').notNull().default(1),
+  lastRequestId: text('last_request_id'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const organizations = sqliteTable('organizations', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  orgType: text('org_type').notNull().default('Prospective client'),
+  website: text('website').notNull().default(''),
+  relationshipOwner: text('relationship_owner').notNull().default(''),
+  source: text('source').notNull().default(''),
+  notes: text('notes').notNull().default(''),
+  status: text('status').notNull().default('Active'),
+  mergedIntoId: text('merged_into_id'),
+  nameKey: text('name_key').notNull().default(''),
+  domain: text('domain').notNull().default(''),
+  ...recordColumns(),
+}, t => [index('organizations_name_key_idx').on(t.nameKey), index('organizations_domain_idx').on(t.domain)]);
+
+export const contacts = sqliteTable('contacts', {
+  id: text('id').primaryKey(),
+  organizationId: text('organization_id'),
+  name: text('name').notNull(),
+  role: text('role').notNull().default(''),
+  email: text('email').notNull().default(''),
+  phone: text('phone').notNull().default(''),
+  relationshipOwner: text('relationship_owner').notNull().default(''),
+  source: text('source').notNull().default(''),
+  notes: text('notes').notNull().default(''),
+  status: text('status').notNull().default('Active'),
+  mergedIntoId: text('merged_into_id'),
+  emailKey: text('email_key').notNull().default(''),
+  ...recordColumns(),
+}, t => [index('contacts_org_idx').on(t.organizationId), index('contacts_email_key_idx').on(t.emailKey)]);
+
+export const requirements = sqliteTable('requirements', {
+  id: text('id').primaryKey(),
+  opportunityId: text('opportunity_id').notNull(),
+  description: text('description').notNull(),
+  category: text('category').notNull().default('Eligibility'),
+  mandatory: integer('mandatory').notNull().default(1),
+  owner: text('owner').notNull().default(''),
+  dueDate: text('due_date'),
+  status: text('status').notNull().default('Not started'),
+  reviewerNotes: text('reviewer_notes').notNull().default(''),
+  ...recordColumns(),
+}, t => [index('requirements_opportunity_idx').on(t.opportunityId)]);
+
+export const evidence = sqliteTable('evidence', {
+  id: text('id').primaryKey(),
+  title: text('title').notNull(),
+  category: text('category').notNull().default('Capability'),
+  versionLabel: text('version_label').notNull().default(''),
+  owner: text('owner').notNull().default(''),
+  reviewStatus: text('review_status').notNull().default('Unreviewed'),
+  reviewDate: text('review_date'),
+  storageKind: text('storage_kind').notNull().default('Reference only'),
+  location: text('location').notNull().default(''),
+  url: text('url').notNull().default(''),
+  notes: text('notes').notNull().default(''),
+  ...recordColumns(),
+});
+
+export const evidenceLinks = sqliteTable('evidence_links', {
+  id: text('id').primaryKey(),
+  evidenceId: text('evidence_id').notNull(),
+  subjectType: text('subject_type').notNull(),
+  subjectId: text('subject_id').notNull(),
+  createdAt: text('created_at').notNull(),
+}, t => [uniqueIndex('evidence_links_uq').on(t.evidenceId, t.subjectType, t.subjectId), index('evidence_links_subject_idx').on(t.subjectType, t.subjectId)]);

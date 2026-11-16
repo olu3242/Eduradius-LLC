@@ -1,0 +1,182 @@
+// Generic persistence for spec-defined records (lib/records.ts). Server-only.
+// One table per type is the authoritative source; every write is version-checked and
+// recorded in activity with a server-derived actor and timestamp.
+import { env } from 'cloudflare:workers';
+import { SPECS, defaults, validateRecord, organizationKey, websiteDomain, emailKey, evidenceState, type TypeSpec, type Values, type EvidenceLink } from '../records';
+import { businessDate, type ActivityDraft } from '../workflow';
+import { activityStatement, type StoreResult } from './workflow-store';
+
+type Row = Record<string, unknown>;
+export function db(): D1Database {
+  if (!env.DB) throw new Error('D1 binding DB is unavailable.');
+  return env.DB;
+}
+export const nowIso = () => new Date().toISOString();
+const EXTERNAL_TABLES: Record<string, string> = { opportunity: 'opportunities', inquiry: 'inquiries' };
+export const tableFor = (type: string): string | undefined => SPECS[type]?.table ?? EXTERNAL_TABLES[type];
+const parse = (v: unknown, fallback: unknown) => { try { return v === null || v === undefined || v === '' ? fallback : JSON.parse(String(v)); } catch { return fallback; } };
+
+export function toRecord(spec: TypeSpec, row: Row): Values {
+  const out: Values = { id: row.id, version: Number(row.version), createdAt: row.created_at, updatedAt: row.updated_at };
+  for (const field of spec.fields) {
+    const v = row[field.column];
+    out[field.key] = field.kind === 'bool' ? Boolean(v) : field.kind === 'refs' ? parse(v, []) : field.kind === 'json' ? parse(v, {}) : v ?? (['date', 'ref'].includes(field.kind) ? null : '');
+  }
+  return out;
+}
+const toColumn = (kind: string, value: unknown) => (kind === 'bool' ? (value ? 1 : 0) : kind === 'refs' || kind === 'json' ? JSON.stringify(value ?? (kind === 'refs' ? [] : {})) : value ?? null);
+
+export async function getRecord(type: string, id: string): Promise<Values | null> {
+  const spec = SPECS[type]; if (!spec) return null;
+  const row = await db().prepare(`SELECT * FROM ${spec.table} WHERE id = ?`).bind(id).first<Row>();
+  return row ? toRecord(spec, row) : null;
+}
+export async function listRecords(type: string): Promise<Values[]> {
+  const spec = SPECS[type];
+  return (await db().prepare(`SELECT * FROM ${spec.table} ORDER BY created_at, rowid`).all<Row>()).results.map(r => toRecord(spec, r));
+}
+export async function recordExists(type: string, id: string) {
+  const table = tableFor(type); if (!table) return false;
+  return Boolean(await db().prepare(`SELECT 1 AS found FROM ${table} WHERE id = ?`).bind(id).first());
+}
+export async function listEvidenceLinks(): Promise<EvidenceLink[]> {
+  return (await db().prepare('SELECT id, evidence_id, subject_type, subject_id, created_at FROM evidence_links ORDER BY created_at, rowid').all<Row>()).results
+    .map(r => ({ id: String(r.id), evidenceId: String(r.evidence_id), subjectType: String(r.subject_type), subjectId: String(r.subject_id), createdAt: String(r.created_at) }));
+}
+export async function listAllRecords() {
+  const entries = await Promise.all(Object.keys(SPECS).map(async type => [type, await listRecords(type)] as const));
+  return { records: Object.fromEntries(entries) as Record<string, Values[]>, evidenceLinks: await listEvidenceLinks() };
+}
+
+// ── Hooks: derived fields, cross-record rules, duplicate detection ──────────
+
+type Hook = {
+  derive?: (v: Values) => Values;
+  validate?: (v: Values, current: Values | null) => Promise<string | null>;
+};
+async function linkedEvidence(subjectType: string, subjectId: string): Promise<Values[]> {
+  const rows = (await db().prepare('SELECT e.* FROM evidence e JOIN evidence_links l ON l.evidence_id = e.id WHERE l.subject_type = ? AND l.subject_id = ?').bind(subjectType, subjectId).all<Row>()).results;
+  return rows.map(r => toRecord(SPECS.evidence, r));
+}
+export const HOOKS: Record<string, Hook> = {
+  organization: { derive: v => ({ ...v, nameKey: organizationKey(String(v.name)), domain: websiteDomain(String(v.website)) }) },
+  contact: { derive: v => ({ ...v, emailKey: emailKey(String(v.email)) }) },
+  requirement: {
+    validate: async (v, current) => {
+      const notes = String(v.reviewerNotes ?? '').trim();
+      if ((v.status === 'Not met' || v.status === 'Not applicable') && !notes) return `Record reviewer notes explaining why this requirement is ${v.status}.`;
+      if (v.status === 'Met' && !notes) {
+        const today = businessDate();
+        const current_ = current ? (await linkedEvidence('requirement', String(current.id))).filter(e => evidenceState(e, today) === 'current') : [];
+        if (!current_.length) return 'Mark Met only with linked evidence that is verified and not expired, or record reviewer notes explaining how it is met.';
+      }
+      return null;
+    },
+  },
+  evidence: {
+    validate: async v => (v.storageKind === 'External link' && !v.url ? 'Provide the approved https link, or choose Reference only.' : v.storageKind === 'Reference only' && v.url ? 'Clear the link or choose External link.' : null),
+  },
+};
+
+export async function findDuplicates(type: string, v: Values, excludeId = '') {
+  if (type === 'organization') {
+    if (!v.nameKey && !v.domain) return [];
+    return (await db().prepare("SELECT id, name, org_type, website FROM organizations WHERE status = 'Active' AND id <> ? AND ((name_key <> '' AND name_key = ?) OR (domain <> '' AND domain = ?))")
+      .bind(excludeId, v.nameKey, v.domain).all<Row>()).results.map(r => ({ id: r.id, name: r.name, orgType: r.org_type, website: r.website }));
+  }
+  if (type === 'contact' && v.emailKey) {
+    return (await db().prepare("SELECT id, name, email, organization_id FROM contacts WHERE status = 'Active' AND id <> ? AND email_key = ?")
+      .bind(excludeId, v.emailKey).all<Row>()).results.map(r => ({ id: r.id, name: r.name, email: r.email, organizationId: r.organization_id }));
+  }
+  return [];
+}
+
+/** References must exist, be active (not merged) and share the declared parent. */
+async function checkRefs(spec: TypeSpec, v: Values, changed: string[] | 'all'): Promise<string | null> {
+  for (const field of spec.fields) {
+    if (field.derived || field.readOnly || !field.ref || (changed !== 'all' && !changed.includes(field.key))) continue;
+    const ids = field.kind === 'refs' ? (v[field.key] as string[]) : v[field.key] ? [v[field.key] as string] : [];
+    for (const id of ids) {
+      const table = tableFor(field.ref);
+      if (!table) return `${field.label} cannot be linked.`;
+      const target = SPECS[field.ref] ? await getRecord(field.ref, id) : (await recordExists(field.ref, id)) ? { id } : null;
+      if (!target) return `${field.label} refers to a record that does not exist.`;
+      if (target.status === 'Merged') return `${field.label} refers to a merged record; link the record it was merged into.`;
+      if (field.sameParent && target[field.sameParent] !== v[field.sameParent]) return `${field.label} must belong to the same ${field.sameParent.replace(/Id$/, '')}.`;
+      if (field.ref === spec.type && id === v.id) return `${field.label} cannot refer to itself.`;
+    }
+  }
+  return null;
+}
+
+// ── Generic create / update ─────────────────────────────────────────────────
+
+const columnsOf = (spec: TypeSpec) => spec.fields.map(field => field.column);
+export function insertStatement(spec: TypeSpec, id: string, v: Values, at: string, requestId: string) {
+  const cols = columnsOf(spec);
+  return db().prepare(`INSERT INTO ${spec.table} (id, ${cols.join(', ')}, version, created_at, updated_at, last_request_id) VALUES (?, ${cols.map(() => '?').join(', ')}, 1, ?, ?, ?)`)
+    .bind(id, ...spec.fields.map(field => toColumn(field.kind, v[field.key])), at, at, requestId);
+}
+/** Version-guarded update of the given keys (all spec fields when omitted). */
+export function updateStatement(spec: TypeSpec, id: string, version: number, v: Values, at: string, requestId: string, keys?: string[]) {
+  const fields = spec.fields.filter(field => !keys || keys.includes(field.key));
+  return db().prepare(`UPDATE ${spec.table} SET ${fields.map(field => `${field.column} = ?`).join(', ')}${fields.length ? ', ' : ''}version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND version = ?`)
+    .bind(...fields.map(field => toColumn(field.kind, v[field.key])), at, requestId, id, version);
+}
+export const guardFor = (table: string) => `SELECT 1 FROM ${table} WHERE id = ? AND last_request_id = ?`;
+export const activity = (actor: string, at: string, subjectType: string, subjectId: string, event: ActivityDraft, table: string, requestId: string) =>
+  activityStatement(actor, at, subjectType, subjectId, event, guardFor(table), [subjectId, requestId]);
+const titleOf = (spec: TypeSpec, v: Values) => (spec.privateTitle ? '' : `: ${String(v[spec.titleKey] ?? '').slice(0, 120)}`);
+export const conflict = (current: unknown) => ({ status: 409, body: { error: 'This record changed since you opened it. Review the latest version and try again.', current } });
+
+export async function createRecord(type: string, input: unknown, actor: string, opts: { confirmDistinct?: boolean; extra?: Values } = {}): Promise<StoreResult<{ record: Values }>> {
+  const spec = SPECS[type];
+  if (!spec) return { status: 404, body: { error: 'Unknown record type.' } };
+  const parsed = validateRecord(spec, input, { ...defaults(spec), ...(opts.extra ?? {}) }, 'create');
+  if (!parsed.ok) return { status: 400, body: { error: parsed.error } };
+  const id = crypto.randomUUID();
+  const value = { ...(HOOKS[type]?.derive?.(parsed.value) ?? parsed.value), id };
+  const refError = await checkRefs(spec, value, 'all');
+  if (refError) return { status: 400, body: { error: refError } };
+  const ruleError = await HOOKS[type]?.validate?.(value, null);
+  if (ruleError) return { status: 400, body: { error: ruleError } };
+  if (!opts.confirmDistinct) {
+    const duplicates = await findDuplicates(type, value);
+    if (duplicates.length) return { status: 409, body: { error: `A matching ${spec.label.toLowerCase()} already exists. Link the existing record or confirm this one is distinct.`, duplicates } as never };
+  }
+  const at = nowIso(), requestId = crypto.randomUUID();
+  await db().batch([
+    insertStatement(spec, id, value, at, requestId),
+    activity(actor, at, type, id, { type: `${type}.created`, summary: `${spec.label} created${titleOf(spec, value)}` }, spec.table, requestId),
+  ]);
+  return { status: 201, body: { record: (await getRecord(type, id))! } };
+}
+
+export async function updateRecord(type: string, id: string, version: unknown, changes: unknown, actor: string, opts: { confirmDistinct?: boolean } = {}): Promise<StoreResult<{ record: Values }>> {
+  const spec = SPECS[type];
+  if (!spec) return { status: 404, body: { error: 'Unknown record type.' } };
+  const current = await getRecord(type, id);
+  if (!current) return { status: 404, body: { error: `${spec.label} not found.` } };
+  if (!Number.isInteger(version)) return { status: 400, body: { error: 'A record version is required.' } };
+  if (current.version !== version) return conflict(current);
+  if (current.status === 'Merged') return { status: 409, body: { error: `This ${spec.label.toLowerCase()} was merged and is kept read-only for reference.` } };
+  const parsed = validateRecord(spec, changes, current, 'update');
+  if (!parsed.ok) return { status: 400, body: { error: parsed.error } };
+  if (!parsed.changed.length) return { status: 200, body: { record: current } };
+  const value = HOOKS[type]?.derive?.(parsed.value) ?? parsed.value;
+  const refError = await checkRefs(spec, value, parsed.changed);
+  if (refError) return { status: 400, body: { error: refError } };
+  const ruleError = await HOOKS[type]?.validate?.(value, current);
+  if (ruleError) return { status: 400, body: { error: ruleError } };
+  if (!opts.confirmDistinct && (value.nameKey !== current.nameKey || value.domain !== current.domain || value.emailKey !== current.emailKey)) {
+    const duplicates = await findDuplicates(type, value, id);
+    if (duplicates.length) return { status: 409, body: { error: `This change matches an existing ${spec.label.toLowerCase()}. Confirm it is distinct or merge the records.`, duplicates } as never };
+  }
+  const at = nowIso(), requestId = crypto.randomUUID();
+  const results = await db().batch([
+    updateStatement(spec, id, current.version as number, value, at, requestId),
+    activity(actor, at, type, id, { type: `${type}.updated`, summary: `${spec.label} updated: ${parsed.changed.join(', ')}`, details: { fields: parsed.changed } }, spec.table, requestId),
+  ]);
+  if (!results[0].meta.changes) return conflict(await getRecord(type, id));
+  return { status: 200, body: { record: (await getRecord(type, id))! } };
+}

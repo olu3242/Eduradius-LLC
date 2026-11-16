@@ -29,19 +29,24 @@ const s = (v: unknown) => (typeof v === 'string' ? v : v === null || v === undef
 
 const INQUIRY_COLUMNS = 'id, kind, name, organization, email, sector, scope, status, legacy_status, assignee, next_action, next_action_due, notes, reason, opportunity_id, source, version, created_at, updated_at';
 const OPPORTUNITY_COLUMNS = 'id, source_inquiry_id, title, agency, url, deadline, value, naics, psc, stage, decision, owner, notes, checks, status, contact_name, contact_email, sector, service, next_action, next_action_due, version, created_at, updated_at';
+// Read-only link columns (migration 0003); changed only by the inquiry.link / opportunity.link actions.
+const INQUIRY_SELECT = INQUIRY_COLUMNS + ', organization_id, contact_id';
+const OPPORTUNITY_SELECT = OPPORTUNITY_COLUMNS + ', organization_id, contact_id';
 
 export const toInquiry = (r: Row): InquiryRecord => ({
   id: s(r.id), kind: s(r.kind), name: s(r.name), organization: s(r.organization), email: s(r.email), sector: s(r.sector), scope: s(r.scope),
   status: s(r.status) as InquiryStatus, legacyStatus: (r.legacy_status as string | null) ?? null, assignee: s(r.assignee), nextAction: s(r.next_action),
   nextActionDue: (r.next_action_due as string | null) ?? null, notes: s(r.notes), reason: s(r.reason), opportunityId: (r.opportunity_id as string | null) ?? null,
-  source: s(r.source), version: Number(r.version), createdAt: s(r.created_at), updatedAt: s(r.updated_at),
+  source: s(r.source), organizationId: (r.organization_id as string | null) ?? null, contactId: (r.contact_id as string | null) ?? null,
+  version: Number(r.version), createdAt: s(r.created_at), updatedAt: s(r.updated_at),
 });
 function parseChecks(value: unknown) { try { return { ...defaultChecks(), ...JSON.parse(s(value)) }; } catch { return defaultChecks(); } }
 export const toOpportunity = (r: Row): OpportunityRecord => ({
   id: s(r.id), sourceInquiryId: (r.source_inquiry_id as string | null) ?? null, title: s(r.title), agency: s(r.agency), url: s(r.url), deadline: s(r.deadline),
   value: s(r.value), naics: s(r.naics), psc: s(r.psc), stage: s(r.stage), decision: s(r.decision), owner: s(r.owner), notes: s(r.notes), checks: parseChecks(r.checks),
   status: s(r.status), contactName: s(r.contact_name), contactEmail: s(r.contact_email), sector: s(r.sector), service: s(r.service), nextAction: s(r.next_action),
-  nextActionDue: (r.next_action_due as string | null) ?? null, version: Number(r.version), createdAt: s(r.created_at), updatedAt: s(r.updated_at),
+  nextActionDue: (r.next_action_due as string | null) ?? null, organizationId: (r.organization_id as string | null) ?? null, contactId: (r.contact_id as string | null) ?? null,
+  version: Number(r.version), createdAt: s(r.created_at), updatedAt: s(r.updated_at),
 });
 const toActivity = (r: Row): ActivityRecord => {
   let details: Record<string, unknown> = {};
@@ -50,15 +55,15 @@ const toActivity = (r: Row): ActivityRecord => {
 };
 const toNotification = (r: Row): NotificationRecord => ({ id: s(r.id), kind: s(r.kind), subjectType: s(r.subject_type), subjectId: (r.subject_id as string | null) ?? null, title: s(r.title), createdAt: s(r.created_at), readAt: (r.read_at as string | null) ?? null, emailStatus: s(r.email_status) });
 const opportunityInput = (o: OpportunityRecord): OpportunityInput => {
-  const { id: _id, sourceInquiryId: _src, version: _v, createdAt: _c, updatedAt: _u, ...input } = o;
-  void _id; void _src; void _v; void _c; void _u;
+  const { id: _id, sourceInquiryId: _src, version: _v, createdAt: _c, updatedAt: _u, organizationId: _o, contactId: _ct, ...input } = o;
+  void _id; void _src; void _v; void _c; void _u; void _o; void _ct;
   return input;
 };
 
 // ── Activity (append-only; actor and time always come from the server) ─────
 
 /** Inserts an activity event only when `guardSql` (an EXISTS subquery) matches. */
-function activityStatement(actor: string, at: string, subjectType: string, subjectId: string | null, event: ActivityDraft, guardSql: string, guardArgs: unknown[]): Statement {
+export function activityStatement(actor: string, at: string, subjectType: string, subjectId: string | null, event: ActivityDraft, guardSql: string, guardArgs: unknown[]): Statement {
   return db().prepare(`INSERT INTO activity_events (id, occurred_at, actor, type, subject_type, subject_id, summary, details) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (${guardSql})`)
     .bind(crypto.randomUUID(), at, actor, event.type, subjectType, subjectId, event.summary.slice(0, 300), JSON.stringify(event.details ?? {}), ...guardArgs);
 }
@@ -66,23 +71,23 @@ function activityStatement(actor: string, at: string, subjectType: string, subje
 // ── Reads ───────────────────────────────────────────────────────────────────
 
 export async function getInquiry(id: string) {
-  const row = await db().prepare(`SELECT ${INQUIRY_COLUMNS} FROM inquiries WHERE id = ?`).bind(id).first<Row>();
+  const row = await db().prepare(`SELECT ${INQUIRY_SELECT} FROM inquiries WHERE id = ?`).bind(id).first<Row>();
   return row ? toInquiry(row) : null;
 }
 export async function getOpportunity(id: string) {
-  const row = await db().prepare(`SELECT ${OPPORTUNITY_COLUMNS} FROM opportunities WHERE id = ?`).bind(id).first<Row>();
+  const row = await db().prepare(`SELECT ${OPPORTUNITY_SELECT} FROM opportunities WHERE id = ?`).bind(id).first<Row>();
   return row ? toOpportunity(row) : null;
 }
 async function getOpportunityForInquiry(inquiryId: string) {
-  const row = await db().prepare(`SELECT ${OPPORTUNITY_COLUMNS} FROM opportunities WHERE source_inquiry_id = ?`).bind(inquiryId).first<Row>();
+  const row = await db().prepare(`SELECT ${OPPORTUNITY_SELECT} FROM opportunities WHERE source_inquiry_id = ?`).bind(inquiryId).first<Row>();
   return row ? toOpportunity(row) : null;
 }
 
 /** Recent activity by default; `allActivity` (exports) returns up to 50,000 entries. */
 export async function listWorkflow({ allActivity = false } = {}) {
   const [inquiries, opportunities, activity, notifications] = await Promise.all([
-    db().prepare(`SELECT ${INQUIRY_COLUMNS} FROM inquiries ORDER BY created_at DESC LIMIT 2000`).all<Row>(),
-    db().prepare(`SELECT ${OPPORTUNITY_COLUMNS} FROM opportunities ORDER BY updated_at DESC LIMIT 2000`).all<Row>(),
+    db().prepare(`SELECT ${INQUIRY_SELECT} FROM inquiries ORDER BY created_at DESC LIMIT 2000`).all<Row>(),
+    db().prepare(`SELECT ${OPPORTUNITY_SELECT} FROM opportunities ORDER BY updated_at DESC LIMIT 2000`).all<Row>(),
     db().prepare('SELECT id, occurred_at, actor, type, subject_type, subject_id, summary, details FROM activity_events ORDER BY occurred_at DESC, rowid DESC LIMIT ?').bind(allActivity ? 50000 : 200).all<Row>(),
     db().prepare('SELECT id, kind, subject_type, subject_id, title, created_at, read_at, email_status FROM notifications ORDER BY (read_at IS NULL) DESC, created_at DESC LIMIT 50').all<Row>(),
   ]);
@@ -165,6 +170,7 @@ export async function convertInquiry(id: string, version: unknown, draft: unknow
           o.contactName, o.contactEmail, o.sector, o.service, o.nextAction, o.nextActionDue, at, at, requestId, id, current.version),
       db().prepare("UPDATE inquiries SET status = 'Converted', opportunity_id = ?, version = version + 1, updated_at = ?, last_request_id = ? WHERE id = ? AND status = 'Qualified' AND version = ? AND opportunity_id IS NULL")
         .bind(opportunityId, at, requestId, id, current.version),
+      db().prepare('UPDATE opportunities SET organization_id = (SELECT organization_id FROM inquiries WHERE id = ?), contact_id = (SELECT contact_id FROM inquiries WHERE id = ?) WHERE id = ? AND last_request_id = ?').bind(id, id, opportunityId, requestId),
       activityStatement(actor, at, 'inquiry', id, { type: 'inquiry.converted', summary: `Converted to opportunity “${o.title}”`, details: { opportunityId } }, converted, [id, requestId]),
       activityStatement(actor, at, 'opportunity', opportunityId, { type: 'opportunity.created', summary: 'Opportunity created from inquiry', details: { sourceInquiryId: id } }, converted, [id, requestId]),
     ]);

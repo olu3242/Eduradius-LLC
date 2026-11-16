@@ -125,12 +125,14 @@ function legacyDocument() {
   return data;
 }
 
-test('existing workspace data from migration 0001 upgrades through 0002 without loss', async () => {
+test('existing workspace data from migration 0001 upgrades through every later migration without loss', async () => {
   db.close(); db = database({ upTo: '0001' }); env.DB = db;
   const original = legacyDocument();
   await writeWorkspace(original, 0);
-  for (const file of migrationFiles().filter(f => f.slice(0, 4) > '0002')) assert.fail(`unexpected later migration ${file}`);
-  db.applyMigration('0002_connected_workflow.sql');
+  // Upgrade exactly as an environment would: apply every later migration in order.
+  const pending = migrationFiles().filter(f => f.slice(0, 4) > '0001');
+  assert.equal(pending[0], '0002_connected_workflow.sql');
+  for (const file of pending) db.applyMigration(file);
 
   const result = await workflow();
   const byId = Object.fromEntries(result.inquiries.map(i => [i.id, i]));

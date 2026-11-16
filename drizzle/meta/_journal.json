@@ -22,6 +22,13 @@
       "when": 1794803215062,
       "tag": "0002_connected_workflow",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1794804962735,
+      "tag": "0003_contracting_records",
+      "breakpoints": true
     }
   ]
 }

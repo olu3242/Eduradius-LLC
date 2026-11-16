@@ -10,7 +10,8 @@ import {
 import { serviceNames } from '../../lib/workspace';
 
 export type AuthInfo = { mode: string; signInUrl?: string; signOutUrl?: string };
-type CallResult<T> = { ok: true; status: number; data: T } | { ok: false; status: number; error: string };
+type CallResult<T> = { ok: true; status: number; data: T } | { ok: false; status: number; error: string; body: RecordValues };
+type RecordValues = Record<string, unknown>;
 type Conversion = { inquiry: InquiryRecord; opportunity: OpportunityRecord; alreadyConverted: boolean };
 
 // ── Data hook ───────────────────────────────────────────────────────────────
@@ -23,10 +24,10 @@ export function useWorkflow(onAuthRequired: (auth: AuthInfo, message: string) =>
     let response: Response;
     try {
       response = await fetch(url, { method, headers: body === undefined ? undefined : { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
-    } catch { return { ok: false, status: 0, error: 'Network error. Check your connection and try again.' }; }
+    } catch { return { ok: false, status: 0, error: 'Network error. Check your connection and try again.', body: {} }; }
     const json = await response.json().catch(() => ({})) as { error?: string; auth?: AuthInfo };
     if (json.auth && [401, 403].includes(response.status)) onAuthRequired(json.auth, response.status === 401 ? 'Your session has ended. Sign in again to continue; open dialogs keep your changes.' : json.error || 'This account cannot access the workspace.');
-    return response.ok ? { ok: true, status: response.status, data: json as T } : { ok: false, status: response.status, error: json.error || 'Request failed. Please try again.' };
+    return response.ok ? { ok: true, status: response.status, data: json as T } : { ok: false, status: response.status, error: json.error || 'Request failed. Please try again.', body: json as RecordValues };
   }, [onAuthRequired]);
   const reload = useCallback(async () => {
     setState(s => (s === 'ready' ? 'ready' : 'loading'));
@@ -47,6 +48,9 @@ export function useWorkflow(onAuthRequired: (auth: AuthInfo, message: string) =>
     createOpportunity: (opportunity: OpportunityInput) => mutate<{ opportunity: OpportunityRecord }>('/api/opportunities', 'POST', { opportunity }),
     updateOpportunity: (id: string, version: number, changes: OpportunityInput) => mutate<{ opportunity: OpportunityRecord }>(`/api/opportunities/${encodeURIComponent(id)}`, 'PATCH', { version, changes }),
     markRead: (body: { ids: string[] } | { all: true }) => mutate<{ updated: number }>('/api/notifications', 'POST', body),
+    createRecord: (type: string, record: RecordValues, confirmDistinct = false) => mutate<{ record: RecordValues; duplicates?: RecordValues[] }>(`/api/records/${encodeURIComponent(type)}`, 'POST', { record, confirmDistinct }),
+    updateRecord: (type: string, current: RecordValues, changes: RecordValues, confirmDistinct = false) => mutate<{ record: RecordValues }>(`/api/records/${encodeURIComponent(type)}/${encodeURIComponent(String(current.id))}`, 'PATCH', { version: current.version, changes, confirmDistinct }),
+    action: <T = RecordValues,>(name: string, body: RecordValues) => mutate<T>(`/api/actions/${encodeURIComponent(name)}`, 'POST', body),
   };
 }
 export type Workflow = ReturnType<typeof useWorkflow>;
@@ -66,7 +70,7 @@ export function DueChip({ due, today }: { due: string | null; today: string }) {
 }
 
 /** Focus trap, Escape to close and focus restoration for workflow dialogs. */
-function useDialog(onClose: () => void) {
+export function useDialog(onClose: () => void) {
   const ref = useRef<HTMLElement>(null);
   const close = useRef(onClose);
   useEffect(() => { close.current = onClose; });
@@ -90,7 +94,7 @@ function useDialog(onClose: () => void) {
   return ref;
 }
 
-function Alert({ message }: { message: string }) { return <div aria-live="assertive">{message && <p className="error" role="alert">{message}</p>}</div>; }
+export function Alert({ message }: { message: string }) { return <div aria-live="assertive">{message && <p className="error" role="alert">{message}</p>}</div>; }
 function TextField({ label, value, onChange, type = 'text', area = false, required = false, hint, disabled = false }: { label: string; value: string; onChange: (v: string) => void; type?: string; area?: boolean; required?: boolean; hint?: string; disabled?: boolean }) {
   const hintId = useId();
   return <label className={'field ' + (area ? 'wide' : '')}><span>{label}{required ? ' *' : ''}</span>
@@ -98,7 +102,7 @@ function TextField({ label, value, onChange, type = 'text', area = false, requir
       : <input type={type} value={value} onChange={e => onChange(e.target.value)} required={required} aria-describedby={hint ? hintId : undefined} disabled={disabled} />}
     {hint && <small id={hintId} className="field-hint">{hint}</small>}</label>;
 }
-function ActivityList({ items, empty }: { items: ActivityRecord[]; empty: string }) {
+export function ActivityList({ items, empty }: { items: ActivityRecord[]; empty: string }) {
   if (!items.length) return <p className="muted">{empty}</p>;
   return <ol className="activity-list">{items.map(a => <li key={a.id}><span>{a.summary}</span><small>{actorLabel(a.actor)} · <time dateTime={a.occurredAt}>{new Date(a.occurredAt).toLocaleString()}</time></small></li>)}</ol>;
 }
