@@ -65,6 +65,12 @@ try {
     artifact: { file: relative(ROOT, archive), sha256: archiveSha, bytes: statSync(archive).size, files: files.length, sourceMaps: files.filter(f => f.endsWith('.map')).length, uncompressedBytes: files.reduce((a, f) => a + statSync(f).size, 0) },
     checks: { buildIdentityEmbedded: identity, servedBuildIdentity: served, servedMatchesCandidate: served === short, localConfigurationFiles: forbiddenNames, credentialPatterns: secretHits, sourceMapsWithAbsoluteBuildPath: absolutePaths },
     migrations,
+    reproducibility: {
+      bitForBit: false,
+      reason: 'vinext generates per-build random values: preview-mode credentials, the Server Actions encryption key (unless NEXT_SERVER_ACTIONS_ENCRYPTION_KEY is set) and the RSC build identity; they change chunk hashes. BUILD_ID is the commit (next.config.ts).',
+      policy: 'Build once from a clean checkout, record this checksum, and deploy exactly this archive. Never rebuild for production.',
+      sensitivity: 'The archive embeds those framework keys: store it privately; do not attach it to public tickets.',
+    },
   };
   manifest.checks.passed = identity && served === short && !forbiddenNames.length && !secretHits.length;
   writeFileSync(join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
