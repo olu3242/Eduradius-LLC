@@ -1,7 +1,7 @@
 // D1 persistence for the connected workflow. Server-only.
 // Authoritative sources: `inquiries`, `opportunities`, `activity_events`, `notifications`.
 // The workspace JSON document no longer stores copies of these records.
-import { env } from 'cloudflare:workers';
+import { env } from '@/lib/server/platform';
 import {
   applyInquiryPatch, emptyOpportunity, mapLegacyInquiryStatus, opportunityEvents, validateOpportunity, defaultChecks,
   OPPORTUNITY_DECISIONS, OPPORTUNITY_STAGES, OPPORTUNITY_STATUSES, CHECK_KEYS, CHECK_VALUES, isIsoDate,

@@ -1,7 +1,7 @@
 // Generic persistence for spec-defined records (lib/records.ts). Server-only.
 // One table per type is the authoritative source; every write is version-checked and
 // recorded in activity with a server-derived actor and timestamp.
-import { env } from 'cloudflare:workers';
+import { env } from '@/lib/server/platform';
 import { SPECS, defaults, validateRecord, validateSections, findCycle, organizationKey, websiteDomain, emailKey, evidenceState, type TypeSpec, type Values, type EvidenceLink } from '../records';
 import { businessDate, type ActivityDraft } from '../workflow';
 import { activityStatement, type StoreResult } from './workflow-store';

@@ -8,7 +8,7 @@
 //           HttpOnly session cookie; `Authorization: Bearer <token>` also works.
 // Unset: the Vite dev server uses `sites` (loopback mock sign-in); every built
 // Worker fails closed until a mode is configured.
-import { env } from 'cloudflare:workers';
+import { env } from '@/lib/server/platform';
 import { discardBody, json, logEvent, sha256Hex } from './http';
 
 export type AuthMode = 'sites' | 'token' | 'unconfigured';

@@ -1,5 +1,5 @@
 // D1 persistence for the single shared workspace document. Server-only.
-import { env } from 'cloudflare:workers';
+import { env } from '@/lib/server/platform';
 
 export const WORKSPACE_ID = 'eduradius';
 export const MAX_WORKSPACE_BYTES = 700000;
